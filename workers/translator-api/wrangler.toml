@@ -1,0 +1,28 @@
+# Cloudflare Worker configuration for the TurnTranslate translation API.
+#
+# Deploy with `npm run deploy --workspace workers/translator-api` once you are
+# logged in via `wrangler login`. Nothing here contains a secret: the Workers AI
+# binding is resolved by Cloudflare at runtime and no API keys are stored.
+
+name = "turntranslate-api"
+main = "src/index.ts"
+compatibility_date = "2025-05-05"
+
+# Workers AI binding. Exposed to the Worker as `env.AI`.
+# Requires a Cloudflare account with Workers AI enabled (free tier works for
+# development; see README "Cost control" for pricing notes).
+[ai]
+binding = "AI"
+
+[vars]
+# Comma-separated list of origins allowed by CORS, e.g.
+#   "https://your-app-host.example,capacitor://localhost"
+# The Even Hub WebView may send no Origin header at all (non-browser fetch),
+# which bypasses CORS entirely — this list only matters for browser contexts
+# such as local development and the simulator.
+ALLOWED_ORIGINS = ""
+
+# When "true", any http://localhost:<port> or http://127.0.0.1:<port> origin is
+# accepted in addition to ALLOWED_ORIGINS. Convenient for `vite dev` and the
+# Even Hub simulator. Set to "false" for production deployments.
+ALLOW_LOCAL_DEV = "true"

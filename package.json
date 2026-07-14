@@ -1,0 +1,45 @@
+{
+  "name": "turntranslate-g2",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Bidirectional conversation translator for Even Realities G2 glasses: Even Hub app + Cloudflare Worker backend.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "workspaces": [
+    "packages/shared",
+    "apps/g2-app",
+    "workers/translator-api"
+  ],
+  "scripts": {
+    "dev:g2": "npm run dev --workspace apps/g2-app",
+    "dev:worker": "npm run dev --workspace workers/translator-api",
+    "build": "npm run build:g2 && npm run build:worker",
+    "build:g2": "npm run build --workspace apps/g2-app",
+    "build:worker": "npm run build --workspace workers/translator-api",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "npm run test --workspaces --if-present",
+    "test:watch": "npm run test:watch --workspace apps/g2-app",
+    "simulate": "npm run simulate --workspace apps/g2-app",
+    "pack:g2": "npm run pack --workspace apps/g2-app"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.20.0",
+    "eslint": "^9.20.0",
+    "eslint-config-prettier": "^10.0.1",
+    "prettier": "^3.5.0",
+    "typescript": "^5.7.3",
+    "typescript-eslint": "^8.24.0"
+  },
+  "allowScripts": {
+    "esbuild@0.28.1": true,
+    "workerd@1.20260708.1": true,
+    "sharp@0.34.5": true
+  }
+}

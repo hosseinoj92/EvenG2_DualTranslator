@@ -1,0 +1,21 @@
+{
+  "package_id": "com.hosseinostovar.turntranslate",
+  "edition": "202601",
+  "name": "TurnTranslate",
+  "version": "0.1.0",
+  "min_app_version": "2.0.0",
+  "min_sdk_version": "0.0.12",
+  "entrypoint": "index.html",
+  "permissions": [
+    {
+      "name": "g2-microphone",
+      "desc": "Capture speech from the glasses microphone so it can be transcribed and translated."
+    },
+    {
+      "name": "network",
+      "desc": "Send completed utterances to the TurnTranslate Cloudflare Worker for transcription and translation. Replace the placeholder origin below with your deployed Worker URL (packing rejects an empty whitelist).",
+      "whitelist": ["https://turntranslate-api.YOUR_SUBDOMAIN.workers.dev"]
+    }
+  ],
+  "supported_languages": ["en"]
+}

@@ -1,0 +1,20 @@
+{
+  "name": "@turntranslate/shared",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Shared API contracts, language registry and direction types for TurnTranslate.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.5"
+  }
+}
