@@ -83,6 +83,36 @@ describe('two-stage result panel', () => {
     expect(translationEl().textContent).toBe('');
   });
 
+  it('shows only the partial transcript while the other person is speaking', () => {
+    ui.update(
+      makeSnapshot({
+        status: 'LISTENING_TO_THEM',
+        direction: 'them-to-me',
+        speechActive: true,
+        partialTranscript: 'Dónde está la estación',
+        partialTranslation: 'Where is the station',
+      }),
+    );
+
+    expect(sourceEl().textContent).toBe('Dónde está la estación');
+    expect(translationEl().textContent).toBe('');
+  });
+
+  it('shows only the partial transcript while the user is speaking', () => {
+    ui.update(
+      makeSnapshot({
+        status: 'LISTENING_TO_ME',
+        direction: 'me-to-them',
+        speechActive: true,
+        partialTranscript: 'Where is the station',
+        partialTranslation: 'Dónde está la estación',
+      }),
+    );
+
+    expect(sourceEl().textContent).toBe('Where is the station');
+    expect(translationEl().textContent).toBe('');
+  });
+
   it('shows the transcript with Translating… before translation resolves', () => {
     ui.update(
       makeSnapshot({

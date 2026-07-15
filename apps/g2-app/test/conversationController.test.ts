@@ -281,40 +281,61 @@ describe('live preview while speaking', () => {
     for (let i = 0; i < frames; i += 1) controller.handleAudioFrame(pcmFrame(8000));
   }
 
-  it('transcribes and translates the audio-so-far every interval, then the final pass wins', async () => {
+  it('previews transcription only, then shows translation after the final pass', async () => {
     vi.useFakeTimers();
+
     const client = new MockClient();
     const controller = makeController(client);
-    controller.startConversation();
-    speakWithoutFinishing(controller); // 1.5 s of speech, still talking
-    expect(client.transcribeCalls).toHaveLength(0);
 
+    controller.startConversation();
+    speakWithoutFinishing(controller);
+
+    expect(client.transcribeCalls).toHaveLength(0);
+    expect(client.translateCalls).toHaveLength(0);
+
+    // First live preview: transcription only.
     await vi.advanceTimersByTimeAsync(appConfig.livePreview.intervalMs);
-    expect(client.transcribeCalls).toHaveLength(1); // preview pass
+
+    expect(client.transcribeCalls).toHaveLength(1);
+    expect(client.translateCalls).toHaveLength(0);
+
     client.resolveTranscription(0, 'Dónde está la');
     await vi.advanceTimersByTimeAsync(0);
+
     expect(controller.snapshot().partialTranscript).toBe('Dónde está la');
-    expect(controller.snapshot().status).toBe('LISTENING_TO_THEM'); // still live
+    expect(controller.snapshot().partialTranslation).toBeNull();
+    expect(controller.snapshot().status).toBe('LISTENING_TO_THEM');
 
-    expect(client.translateCalls).toHaveLength(1); // preview translation
-    client.resolveTranslation(0, 'Where is the');
-    await vi.advanceTimersByTimeAsync(0);
-    expect(controller.snapshot().partialTranslation).toBe('Where is the');
+    // A live preview must never request translation.
+    expect(client.translateCalls).toHaveLength(0);
 
-    // Speaker finishes: previews stop, the authoritative final chain runs.
+    // Speaker finishes. The authoritative final chain starts.
     const silentFrames = Math.ceil(appConfig.vad.endSilenceMs / appConfig.vad.frameMs) + 2;
-    for (let i = 0; i < silentFrames; i += 1) controller.handleAudioFrame(pcmFrame(0));
+
+    for (let i = 0; i < silentFrames; i += 1) {
+      controller.handleAudioFrame(pcmFrame(0));
+    }
+
+    // Preview transcription + final transcription.
     expect(client.transcribeCalls).toHaveLength(2);
 
     client.resolveTranscription(1, '¿Dónde está la estación?');
     await vi.advanceTimersByTimeAsync(0);
-    expect(controller.snapshot().currentTranscript).toBe('¿Dónde está la estación?');
-    expect(controller.snapshot().partialTranscript).toBeNull(); // final replaced preview
 
-    client.resolveTranslation(1, 'Where is the station?');
+    expect(controller.snapshot().currentTranscript).toBe('¿Dónde está la estación?');
+    expect(controller.snapshot().partialTranscript).toBeNull();
+
+    // Translation begins only after final transcription.
+    expect(client.translateCalls).toHaveLength(1);
+    expect(client.translateCalls[0]!.text).toBe('¿Dónde está la estación?');
+
+    client.resolveTranslation(0, 'Where is the station?');
     await vi.advanceTimersByTimeAsync(0);
+
     expect(controller.snapshot().latestTurn?.transcript).toBe('¿Dónde está la estación?');
-    expect(controller.snapshot().history).toHaveLength(1); // previews never create turns
+    expect(controller.snapshot().latestTurn?.translation).toBe('Where is the station?');
+    expect(controller.snapshot().history).toHaveLength(1);
+
     controller.dispose();
   });
 
@@ -347,21 +368,17 @@ describe('live preview while speaking', () => {
     client.resolveTranscription(0, 'so far');
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(client.translateCalls).toHaveLength(1);
+    // Preview passes never perform translation.
+    expect(client.translateCalls).toHaveLength(0);
 
-    client.resolveTranslation(0, 'hasta ahora');
-    await vi.advanceTimersByTimeAsync(0);
-
-    // The newest queued snapshot starts immediately. It does not wait for
-    // another timer tick.
+    // Finishing preview transcription immediately starts the newest queued
+    // cumulative snapshot.
     expect(client.transcribeCalls).toHaveLength(2);
 
     // Continue speaking while preview 2 is unresolved.
     speakWithoutFinishing(controller);
 
-    await vi.advanceTimersByTimeAsync(
-      appConfig.livePreview.intervalMs * 3,
-    );
+    await vi.advanceTimersByTimeAsync(appConfig.livePreview.intervalMs * 3);
 
     // Further timer ticks may replace the queued snapshot, but they must never
     // create preview 3 while preview 2 is still active.

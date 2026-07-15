@@ -717,10 +717,16 @@ describe('live partial previews', () => {
     expect(reduce(withPartial(), { type: 'END_CONVERSATION' }).state.partialTranscript).toBeNull();
 
     let state = reduce(withPartial(), { type: 'UTTERANCE_COMPLETED', requestId: 'r1' }).state;
-    state = reduce(state, { type: 'TRANSCRIPTION_SUCCEEDED', requestId: 'r1', transcript: 'x' })
-      .state;
-    state = reduce(state, { type: 'PROCESSING_SUCCEEDED', requestId: 'r1', turn: makeTurn() })
-      .state;
+    state = reduce(state, {
+      type: 'TRANSCRIPTION_SUCCEEDED',
+      requestId: 'r1',
+      transcript: 'x',
+    }).state;
+    state = reduce(state, {
+      type: 'PROCESSING_SUCCEEDED',
+      requestId: 'r1',
+      turn: makeTurn(),
+    }).state;
     expect(state.partialTranscript).toBeNull();
     expect(state.partialTranslation).toBeNull();
   });

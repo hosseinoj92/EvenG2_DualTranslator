@@ -338,10 +338,7 @@ export class ConversationController {
 
     if (!preview.enabled) return;
 
-    this.previewTimer = setInterval(
-      () => this.capturePreviewSnapshot(),
-      preview.intervalMs,
-    );
+    this.previewTimer = setInterval(() => this.capturePreviewSnapshot(), preview.intervalMs);
   }
 
   private stopPreviewLoop(): void {
@@ -364,18 +361,14 @@ export class ConversationController {
    */
   private capturePreviewSnapshot(): void {
     const isListening =
-      this.state.status === 'LISTENING_TO_THEM' ||
-      this.state.status === 'LISTENING_TO_ME';
+      this.state.status === 'LISTENING_TO_THEM' || this.state.status === 'LISTENING_TO_ME';
 
     if (!isListening || !this.state.speechActive) {
       this.stopPreviewLoop();
       return;
     }
 
-    if (
-      this.previewRequestsUsed >=
-      ConversationController.MAX_PREVIEW_REQUESTS_PER_UTTERANCE
-    ) {
+    if (this.previewRequestsUsed >= ConversationController.MAX_PREVIEW_REQUESTS_PER_UTTERANCE) {
       return;
     }
 
@@ -407,22 +400,17 @@ export class ConversationController {
   private startPreviewPass(pcm: Uint8Array): void {
     if (this.previewAbort !== null) return;
 
-    if (
-      this.previewRequestsUsed >=
-      ConversationController.MAX_PREVIEW_REQUESTS_PER_UTTERANCE
-    ) {
+    if (this.previewRequestsUsed >= ConversationController.MAX_PREVIEW_REQUESTS_PER_UTTERANCE) {
       return;
     }
 
     const isListening =
-      this.state.status === 'LISTENING_TO_THEM' ||
-      this.state.status === 'LISTENING_TO_ME';
+      this.state.status === 'LISTENING_TO_THEM' || this.state.status === 'LISTENING_TO_ME';
 
     if (!isListening || !this.state.speechActive) return;
 
     const generation = this.utteranceGeneration;
-    const direction = this.state.direction;
-    const { sourceLanguage, targetLanguage } = this.languagesFor(direction);
+    const { sourceLanguage } = this.languagesFor(this.state.direction);
     const controller = new AbortController();
     const wav = encodeWav(pcm, this.deps.config.audio);
 
@@ -435,11 +423,17 @@ export class ConversationController {
       generation === this.utteranceGeneration &&
       !controller.signal.aborted &&
       this.state.speechActive &&
-      (this.state.status === 'LISTENING_TO_THEM' ||
-        this.state.status === 'LISTENING_TO_ME');
+      (this.state.status === 'LISTENING_TO_THEM' || this.state.status === 'LISTENING_TO_ME');
 
     const pass = async (): Promise<void> => {
       try {
+        /*
+         * Live previews are transcription-only.
+         *
+         * Translation is deliberately not requested here. A translated sentence
+         * is shown only after the completed utterance has passed through the
+         * authoritative final transcription and final translation chain.
+         */
         const transcription = await this.deps.client.transcribeFinal({
           wav,
           sourceLanguage,
@@ -452,65 +446,39 @@ export class ConversationController {
         const transcript = transcription.transcript.trim();
         if (transcript.length === 0) return;
 
-        /*
-         * Do not leave an older translation under a newer transcript. For an
-         * existing preview, replace the translation with a temporary status
-         * before publishing the updated transcript.
-         */
-        if (this.state.partialTranscript !== null) {
-          this.dispatch({
-            type: 'PARTIAL_TRANSLATION',
-            translation: 'Translating…',
-          });
-        }
-
         this.dispatch({
           type: 'PARTIAL_TRANSCRIPT',
           transcript,
         });
-
-        const response = await this.deps.client.translateText({
-          text: transcript,
-          sourceLanguage,
-          targetLanguage,
-          direction,
-          requestId: makeId(),
-          signal: controller.signal,
-        });
-
-        if (!operationIsCurrent()) return;
-
-        this.dispatch({
-          type: 'PARTIAL_TRANSLATION',
-          translation: response.translation,
-        });
       } catch {
-        // Preview failures are intentionally nonfatal. The final full-utterance
-        // chain remains authoritative and has its own error handling.
+        /*
+         * Preview failures are intentionally nonfatal. The completed utterance
+         * still receives its authoritative final transcription and translation.
+         */
       } finally {
         /*
-         * An old aborted preview must never clear ownership belonging to a
-         * newer preview operation.
+         * Only the operation that still owns previewAbort may clear the current
+         * preview state or start the queued preview. An older aborted operation does
+         * nothing here.
          */
-        if (this.previewAbort !== controller) return;
+        if (this.previewAbort === controller) {
+          this.previewAbort = null;
 
-        this.previewAbort = null;
+          const queued = this.queuedPreviewPcm;
+          this.queuedPreviewPcm = null;
 
-        const queued = this.queuedPreviewPcm;
-        this.queuedPreviewPcm = null;
+          const canContinue =
+            queued !== null &&
+            queued.length > this.lastPreviewBytesSubmitted &&
+            generation === this.utteranceGeneration &&
+            this.state.speechActive &&
+            (this.state.status === 'LISTENING_TO_THEM' ||
+              this.state.status === 'LISTENING_TO_ME') &&
+            this.previewRequestsUsed < ConversationController.MAX_PREVIEW_REQUESTS_PER_UTTERANCE;
 
-        const canContinue =
-          queued !== null &&
-          queued.length > this.lastPreviewBytesSubmitted &&
-          generation === this.utteranceGeneration &&
-          this.state.speechActive &&
-          (this.state.status === 'LISTENING_TO_THEM' ||
-            this.state.status === 'LISTENING_TO_ME') &&
-          this.previewRequestsUsed <
-            ConversationController.MAX_PREVIEW_REQUESTS_PER_UTTERANCE;
-
-        if (canContinue) {
-          this.startPreviewPass(queued);
+          if (canContinue) {
+            this.startPreviewPass(queued);
+          }
         }
       }
     };

@@ -79,11 +79,14 @@ export function composeLivePartialBody(parts: {
   transcript: string;
   translation: string | null;
 }): string {
-  const source = toDisplayText(parts.transcript, BODY_BUDGETS.source);
-  if (parts.translation === null) {
-    return source;
-  }
-  return `${source}\n\n→ ${toDisplayText(parts.translation, BODY_BUDGETS.translation)}`;
+  /*
+   * Live screens intentionally show transcription only.
+   *
+   * Even if stale partial-translation state somehow exists, it is ignored.
+   * Actual translated text appears only in SHOWING_THEM_RESULT or
+   * READ_ALOUD_PAUSED after the final translation completes.
+   */
+  return toDisplayText(parts.transcript, BODY_BUDGETS.pendingTranscript);
 }
 
 /**

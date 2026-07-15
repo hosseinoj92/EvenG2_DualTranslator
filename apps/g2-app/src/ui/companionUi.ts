@@ -190,14 +190,17 @@ export function mountCompanionUi(root: HTMLElement, callbacks: CompanionUiCallba
     ) {
       resultSpeaker.textContent = speakerLabel(snapshot.direction);
       sourceText.textContent = snapshot.partialTranscript;
-      translatedText.textContent = snapshot.partialTranslation ?? 'Translating…';
+
+      // No translated text is displayed until the final translation completes.
+      translatedText.textContent = '';
       return;
     }
     if (snapshot.processingPhase === 'transcribing') {
       resultSpeaker.textContent = speakerLabel(snapshot.direction);
       sourceText.textContent = snapshot.partialTranscript ?? 'Processing speech…';
-      translatedText.textContent =
-        snapshot.partialTranscript !== null ? (snapshot.partialTranslation ?? '') : '';
+
+      // The authoritative translation has not started yet.
+      translatedText.textContent = '';
       return;
     }
     if (snapshot.processingPhase === 'translating' && snapshot.currentTranscript !== null) {

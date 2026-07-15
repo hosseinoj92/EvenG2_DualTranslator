@@ -187,7 +187,7 @@ describe('live preview layouts', () => {
     expect(model.footer).toBe('R1: your turn');
   });
 
-  it('adds the partial translation once it arrives', () => {
+  it('never shows an unfinished partial translation while they are speaking', () => {
     const model = buildDisplayModel(
       makeInput({
         status: 'LISTENING_TO_THEM',
@@ -195,10 +195,14 @@ describe('live preview layouts', () => {
         partialTranslation: 'Where is the station',
       }),
     );
-    expect(model.body).toBe('Dónde está la estación\n\n→ Where is the station');
+
+    expect(model.header).toBe('THEM');
+    expect(model.body).toBe('Dónde está la estación');
+    expect(model.body).not.toContain('Where is the station');
+    expect(model.body).not.toContain('→');
   });
 
-  it('shows the live preview for the outgoing direction too', () => {
+  it('shows only the outgoing partial transcript while the user is speaking', () => {
     const model = buildDisplayModel(
       makeInput({
         status: 'LISTENING_TO_ME',
@@ -207,8 +211,11 @@ describe('live preview layouts', () => {
         partialTranslation: 'Dónde está',
       }),
     );
+
     expect(model.header).toBe('YOUR TURN');
-    expect(model.body).toBe('Where is the\n\n→ Dónde está');
+    expect(model.body).toBe('Where is the');
+    expect(model.body).not.toContain('Dónde está');
+    expect(model.body).not.toContain('→');
     expect(model.footer).toBe('R1: cancel');
   });
 

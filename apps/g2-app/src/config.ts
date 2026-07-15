@@ -82,14 +82,14 @@ export const appConfig = {
    * Each preview is a billed Workers AI call; set `enabled: false` to return
    * to strict one-request-per-utterance behaviour.
    */
-livePreview: {
-  enabled: true as boolean,
-  intervalMs: 1_500,
-  minAudioMs: 1_200,
+  livePreview: {
+    enabled: true as boolean,
+    intervalMs: 1_500,
+    minAudioMs: 1_200,
 
-  /** Maximum cumulative preview passes before the authoritative final pass. */
-  maxPreviewRequestsPerUtterance: 8,
-},
+    /** Maximum cumulative preview passes before the authoritative final pass. */
+    maxPreviewRequestsPerUtterance: 8,
+  },
 
   conversation: {
     /** Ignore direction-toggle clicks arriving faster than this. */
