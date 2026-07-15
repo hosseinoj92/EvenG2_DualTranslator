@@ -69,6 +69,8 @@ export type ConversationEvent =
       direction: ConversationDirection;
       text: string;
     }
+  | { type: 'PARTIAL_TRANSCRIPT'; transcript: string }
+  | { type: 'PARTIAL_TRANSLATION'; translation: string }
   | { type: 'TRANSCRIPTION_SUCCEEDED'; requestId: string; transcript: string }
   | { type: 'PROCESSING_SUCCEEDED'; requestId: string; turn: ConversationTurn }
   | { type: 'PROCESSING_FAILED'; requestId: string; error: MachineErrorInfo }
@@ -107,6 +109,14 @@ export interface MachineState {
    * completes or the utterance is abandoned.
    */
   currentTranscript: string | null;
+  /**
+   * Live preview of the utterance still being spoken: what has been said so
+   * far, transcribed (and translated) every preview interval. Best-effort —
+   * replaced by the authoritative final transcript when the utterance
+   * completes, and cleared on every path that abandons the utterance.
+   */
+  partialTranscript: string | null;
+  partialTranslation: string | null;
   history: ConversationTurn[];
   /** Index into history while BROWSING_HISTORY; null otherwise. */
   historyIndex: number | null;
@@ -134,6 +144,8 @@ export function initialMachineState(online: boolean): MachineState {
     activeRequestId: null,
     processingPhase: 'idle',
     currentTranscript: null,
+    partialTranscript: null,
+    partialTranslation: null,
     history: [],
     historyIndex: null,
     browsingReturnStatus: null,
@@ -192,6 +204,8 @@ function reduce(
           activeRequestId: null,
           processingPhase: 'idle',
           currentTranscript: null,
+          partialTranscript: null,
+          partialTranslation: null,
           historyIndex: null,
           browsingReturnStatus: null,
           speechActive: false,
@@ -216,6 +230,8 @@ function reduce(
           activeRequestId: null,
           processingPhase: 'idle',
           currentTranscript: null,
+          partialTranscript: null,
+          partialTranslation: null,
           historyIndex: null,
           browsingReturnStatus: null,
           speechActive: false,
@@ -253,6 +269,8 @@ function reduce(
           activeRequestId: null,
           processingPhase: 'idle',
           currentTranscript: null,
+          partialTranscript: null,
+          partialTranslation: null,
           historyIndex: null,
           browsingReturnStatus: null,
           speechActive: false,
@@ -275,6 +293,8 @@ function reduce(
           activeRequestId: null,
           processingPhase: 'idle',
           currentTranscript: null,
+          partialTranscript: null,
+          partialTranslation: null,
           historyIndex: null,
           browsingReturnStatus: null,
           speechActive: false,
@@ -340,8 +360,31 @@ function reduceSetup(state: MachineState, event: ConversationEvent): TransitionR
 function reduceListening(state: MachineState, event: ConversationEvent): TransitionResult {
   switch (event.type) {
     case 'SPEECH_STARTED':
-      // A new utterance begins: any leftover transient transcript is stale.
-      return { state: { ...state, speechActive: true, currentTranscript: null }, effects: [] };
+      // A new utterance begins: any leftover transient text is stale.
+      return {
+        state: {
+          ...state,
+          speechActive: true,
+          currentTranscript: null,
+          partialTranscript: null,
+          partialTranslation: null,
+        },
+        effects: [],
+      };
+
+    case 'PARTIAL_TRANSCRIPT':
+      // Live preview of the sentence still being spoken. Only accepted while
+      // actually recording; anything arriving later belongs to a dead preview.
+      // The previous partial translation is kept (it is a prefix of the new
+      // text) so the display stays stable until the fresher one arrives.
+      if (!state.speechActive) return { state, effects: [] };
+      return { state: { ...state, partialTranscript: event.transcript }, effects: [] };
+
+    case 'PARTIAL_TRANSLATION':
+      if (!state.speechActive || state.partialTranscript === null) {
+        return { state, effects: [] };
+      }
+      return { state: { ...state, partialTranslation: event.translation }, effects: [] };
 
     case 'UTTERANCE_COMPLETED':
       return {
@@ -377,13 +420,15 @@ function reduceProcessing(
       if (event.requestId !== state.activeRequestId) {
         return { state, effects: [] }; // Stale transcript: ignore entirely.
       }
-      // The completed transcript becomes visible immediately; the controller
-      // continues its chain with the translation request.
+      // The completed transcript becomes visible immediately (replacing any
+      // live preview); the controller continues with the translation request.
       return {
         state: {
           ...state,
           processingPhase: 'translating',
           currentTranscript: event.transcript,
+          partialTranscript: null,
+          partialTranslation: null,
         },
         effects: [],
       };
@@ -403,6 +448,8 @@ function reduceProcessing(
             activeRequestId: null,
             processingPhase: 'idle',
             currentTranscript: null,
+            partialTranscript: null,
+            partialTranslation: null,
             lastError: null,
           },
           effects: [],
@@ -416,6 +463,8 @@ function reduceProcessing(
           activeRequestId: null,
           processingPhase: 'idle',
           currentTranscript: null,
+          partialTranscript: null,
+          partialTranslation: null,
           lastError: null,
         },
         effects: [{ type: 'SCHEDULE_RESUME' }],
@@ -428,13 +477,15 @@ function reduceProcessing(
       }
       // currentTranscript is deliberately preserved: when translation failed
       // after a successful transcription, the error display shows what was
-      // recognized and a retry can reuse it.
+      // recognized and a retry can reuse it. Live previews are dropped.
       return {
         state: {
           ...state,
           status: 'ERROR',
           activeRequestId: null,
           processingPhase: 'idle',
+          partialTranscript: null,
+          partialTranslation: null,
           lastError: event.error,
         },
         effects: [],
@@ -614,6 +665,8 @@ function handleManualInput(
       // Manual input skips transcription: the typed text is the transcript.
       processingPhase: 'translating',
       currentTranscript: event.text,
+      partialTranscript: null,
+      partialTranslation: null,
       historyIndex: null,
       browsingReturnStatus: null,
       speechActive: false,
@@ -638,6 +691,8 @@ function toggleFromLive(state: MachineState): TransitionResult {
       direction: next,
       processingPhase: 'idle',
       currentTranscript: null,
+      partialTranscript: null,
+      partialTranslation: null,
       speechActive: false,
       lastError: null,
     },
@@ -666,6 +721,9 @@ function enterBrowsing(state: MachineState): TransitionResult {
       historyIndex: index,
       browsingReturnStatus: returnStatus,
       speechActive: false,
+      // Any in-flight utterance preview dies with the VAD reset.
+      partialTranscript: null,
+      partialTranslation: null,
     },
     effects: [{ type: 'RESET_VAD' }],
   };

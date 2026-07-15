@@ -29,10 +29,14 @@ export const API_PATHS = {
 
 /** Constraints enforced by the Worker and respected by the client. */
 export const API_LIMITS = {
-  /** Hard cap on the uploaded WAV payload. 15 s of 16 kHz mono s16le is ~470 KB. */
+  /** Hard cap on the uploaded WAV payload. 30 s of 16 kHz mono s16le is ~940 KB. */
   maxAudioBytes: 4 * 1024 * 1024,
-  /** Longest utterance the service will transcribe. */
-  maxUtteranceMs: 15_000,
+  /**
+   * Longest utterance the service will transcribe. Slightly above the
+   * frontend's 30 s recording cap so a maximum-length utterance (plus
+   * pre-roll) is never rejected.
+   */
+  maxUtteranceMs: 32_000,
   /** Longest accepted manual text input. */
   maxTextLength: 1_000,
   /** requestId must be a short opaque token (UUIDs are 36 chars). */

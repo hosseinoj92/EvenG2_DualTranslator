@@ -182,10 +182,22 @@ export function mountCompanionUi(root: HTMLElement, callbacks: CompanionUiCallba
    * All conversation text is rendered via textContent — never innerHTML.
    */
   function renderResult(snapshot: AppSnapshot): void {
+    // Live preview while someone is still speaking: what has been said so
+    // far, refreshed every preview interval, with its translation underneath.
+    if (
+      snapshot.partialTranscript !== null &&
+      (snapshot.status === 'LISTENING_TO_THEM' || snapshot.status === 'LISTENING_TO_ME')
+    ) {
+      resultSpeaker.textContent = speakerLabel(snapshot.direction);
+      sourceText.textContent = snapshot.partialTranscript;
+      translatedText.textContent = snapshot.partialTranslation ?? 'Translating…';
+      return;
+    }
     if (snapshot.processingPhase === 'transcribing') {
       resultSpeaker.textContent = speakerLabel(snapshot.direction);
-      sourceText.textContent = 'Processing speech…';
-      translatedText.textContent = '';
+      sourceText.textContent = snapshot.partialTranscript ?? 'Processing speech…';
+      translatedText.textContent =
+        snapshot.partialTranscript !== null ? (snapshot.partialTranslation ?? '') : '';
       return;
     }
     if (snapshot.processingPhase === 'translating' && snapshot.currentTranscript !== null) {

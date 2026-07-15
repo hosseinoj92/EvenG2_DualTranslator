@@ -28,6 +28,8 @@ function makeInput(overrides: Partial<DisplayInput> = {}): DisplayInput {
     direction: 'them-to-me',
     processingPhase: 'idle',
     currentTranscript: null,
+    partialTranscript: null,
+    partialTranslation: null,
     settings: { myLanguage: 'en', otherLanguage: 'es' },
     latestTurn: null,
     browsingTurn: null,
@@ -172,6 +174,69 @@ describe('outgoing (me-to-them) layouts', () => {
     const turn = makeTurn({ direction: 'me-to-them', targetLanguage: 'es', translation: long });
     const model = buildDisplayModel(makeInput({ status: 'READ_ALOUD_PAUSED', latestTurn: turn }));
     expect(model.body.length).toBeGreaterThan(BODY_BUDGETS.translation);
+  });
+});
+
+describe('live preview layouts', () => {
+  it('shows the partial transcript while they are still speaking', () => {
+    const model = buildDisplayModel(
+      makeInput({ status: 'LISTENING_TO_THEM', partialTranscript: 'Dónde está la' }),
+    );
+    expect(model.header).toBe('THEM');
+    expect(model.body).toBe('Dónde está la');
+    expect(model.footer).toBe('R1: your turn');
+  });
+
+  it('adds the partial translation once it arrives', () => {
+    const model = buildDisplayModel(
+      makeInput({
+        status: 'LISTENING_TO_THEM',
+        partialTranscript: 'Dónde está la estación',
+        partialTranslation: 'Where is the station',
+      }),
+    );
+    expect(model.body).toBe('Dónde está la estación\n\n→ Where is the station');
+  });
+
+  it('shows the live preview for the outgoing direction too', () => {
+    const model = buildDisplayModel(
+      makeInput({
+        status: 'LISTENING_TO_ME',
+        direction: 'me-to-them',
+        partialTranscript: 'Where is the',
+        partialTranslation: 'Dónde está',
+      }),
+    );
+    expect(model.header).toBe('YOUR TURN');
+    expect(model.body).toBe('Where is the\n\n→ Dónde está');
+    expect(model.footer).toBe('R1: cancel');
+  });
+
+  it('keeps the last preview visible while the final transcription runs', () => {
+    const model = buildDisplayModel(
+      makeInput({
+        status: 'PROCESSING_THEM',
+        processingPhase: 'transcribing',
+        partialTranscript: 'Dónde está la estación',
+      }),
+    );
+    expect(model.header).toBe('THEM');
+    expect(model.body).toBe('Dónde está la estación\n\nProcessing speech…');
+    expect(model.footer).toBe('Please wait');
+  });
+
+  it('the final transcript screen wins over any leftover preview', () => {
+    const model = buildDisplayModel(
+      makeInput({
+        status: 'PROCESSING_THEM',
+        processingPhase: 'translating',
+        currentTranscript: '¿Dónde está la estación?',
+        partialTranscript: 'stale preview',
+      }),
+    );
+    expect(model.header).toBe('THEY SAID');
+    expect(model.body).toContain('¿Dónde está la estación?');
+    expect(model.body).not.toContain('stale preview');
   });
 });
 

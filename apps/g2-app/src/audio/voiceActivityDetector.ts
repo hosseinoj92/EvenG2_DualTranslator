@@ -89,6 +89,18 @@ export class VoiceActivityDetector {
     return { rms: this.lastRms, speaking: this.state === 'recording', state: this.state };
   }
 
+  /**
+   * Non-destructive copy of the utterance recorded so far (pre-roll
+   * included). Null unless currently recording. Used for live preview
+   * transcription of long sentences; recording continues unaffected.
+   */
+  snapshotUtterance(): Uint8Array | null {
+    if (this.state !== 'recording' || this.utteranceFrames.length === 0) {
+      return null;
+    }
+    return concatPcm(this.utteranceFrames);
+  }
+
   private processFrame(frame: Uint8Array): void {
     const rms = rmsOfPcm16(frame);
     this.lastRms = rms;

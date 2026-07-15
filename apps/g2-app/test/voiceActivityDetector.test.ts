@@ -126,6 +126,25 @@ describe('VoiceActivityDetector', () => {
     expect(vad.debugInfo.rms).toBe(0);
   });
 
+  it('snapshotUtterance returns the audio-so-far only while recording', () => {
+    const { vad, onUtterance } = makeVad();
+    expect(vad.snapshotUtterance()).toBeNull(); // idle
+
+    feed(vad, silenceFrame, 5);
+    feed(vad, speechFrame, 10); // recording: 5 pre-roll + 10 speech frames
+    const snapshot = vad.snapshotUtterance();
+    expect(snapshot).not.toBeNull();
+    expect(snapshot!.length).toBe(15 * FRAME_BYTES);
+
+    // Snapshot is non-destructive: recording continues and the final
+    // utterance still contains everything.
+    feed(vad, speechFrame, 10);
+    feed(vad, silenceFrame, 5);
+    expect(onUtterance).toHaveBeenCalledTimes(1);
+    expect(onUtterance.mock.calls[0]![0].length).toBe(30 * FRAME_BYTES);
+    expect(vad.snapshotUtterance()).toBeNull(); // back to idle
+  });
+
   it('handles arbitrary chunk sizes (BLE fragmentation)', () => {
     const { vad, onUtterance } = makeVad();
     // Deliver the same audio as one big pre-concatenated chunk of odd size.

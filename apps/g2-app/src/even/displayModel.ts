@@ -27,6 +27,10 @@ export interface DisplayInput {
   processingPhase: ProcessingPhase;
   /** Completed transcript while translation is pending or failed. */
   currentTranscript: string | null;
+  /** Live preview of the sentence still being spoken. */
+  partialTranscript: string | null;
+  /** Live preview translation of `partialTranscript`. */
+  partialTranslation: string | null;
   settings: LanguageSettings;
   latestTurn: ConversationTurn | null;
   browsingTurn: ConversationTurn | null;
@@ -68,6 +72,21 @@ export function composeTranslationPendingBody(transcript: string): string {
 }
 
 /**
+ * Live preview while the speaker is still talking: what has been said so far,
+ * plus its translation once the first preview pass returns one.
+ */
+export function composeLivePartialBody(parts: {
+  transcript: string;
+  translation: string | null;
+}): string {
+  const source = toDisplayText(parts.transcript, BODY_BUDGETS.source);
+  if (parts.translation === null) {
+    return source;
+  }
+  return `${source}\n\n→ ${toDisplayText(parts.translation, BODY_BUDGETS.translation)}`;
+}
+
+/**
  * One history entry always shows both texts — original first, translation
  * second — using the languages stored in the turn, never current settings.
  */
@@ -88,6 +107,18 @@ export function buildDisplayModel(input: DisplayInput): DisplayModel {
       };
 
     case 'LISTENING_TO_THEM':
+      // While they are talking, the preview loop writes what has been said so
+      // far (and its translation) every interval instead of a blank screen.
+      if (input.partialTranscript !== null) {
+        return {
+          header: 'THEM',
+          body: composeLivePartialBody({
+            transcript: input.partialTranscript,
+            translation: input.partialTranslation,
+          }),
+          footer: 'R1: your turn',
+        };
+      }
       return {
         header: 'THEM',
         body: 'Listening…',
@@ -100,6 +131,14 @@ export function buildDisplayModel(input: DisplayInput): DisplayModel {
           header: 'THEY SAID',
           body: composeTranslationPendingBody(input.currentTranscript),
           footer: '',
+        };
+      }
+      // The last live preview stays up while the final transcription runs.
+      if (input.partialTranscript !== null) {
+        return {
+          header: 'THEM',
+          body: `${toDisplayText(input.partialTranscript, BODY_BUDGETS.pendingTranscript)}\n\nProcessing speech…`,
+          footer: 'Please wait',
         };
       }
       return { header: 'THEM', body: 'Processing speech…', footer: 'Please wait' };
@@ -117,6 +156,16 @@ export function buildDisplayModel(input: DisplayInput): DisplayModel {
       };
 
     case 'LISTENING_TO_ME':
+      if (input.partialTranscript !== null) {
+        return {
+          header: 'YOUR TURN',
+          body: composeLivePartialBody({
+            transcript: input.partialTranscript,
+            translation: input.partialTranslation,
+          }),
+          footer: 'R1: cancel',
+        };
+      }
       return {
         header: 'YOUR TURN',
         body: `Speak ${my.name}…`,
@@ -129,6 +178,13 @@ export function buildDisplayModel(input: DisplayInput): DisplayModel {
           header: 'YOU SAID',
           body: composeTranslationPendingBody(input.currentTranscript),
           footer: '',
+        };
+      }
+      if (input.partialTranscript !== null) {
+        return {
+          header: 'YOU',
+          body: `${toDisplayText(input.partialTranscript, BODY_BUDGETS.pendingTranscript)}\n\nProcessing speech…`,
+          footer: 'Please wait',
         };
       }
       return { header: 'YOU', body: 'Processing speech…', footer: 'Please wait' };

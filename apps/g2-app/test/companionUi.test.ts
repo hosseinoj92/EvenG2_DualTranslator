@@ -35,6 +35,8 @@ function makeSnapshot(overrides: Partial<AppSnapshot> = {}): AppSnapshot {
     speechActive: false,
     processingPhase: 'idle',
     currentTranscript: null,
+    partialTranscript: null,
+    partialTranslation: null,
     history: [],
     historyIndex: null,
     latestTurn: null,

@@ -626,6 +626,84 @@ describe('two-stage processing phases and transient transcript', () => {
   });
 });
 
+describe('live partial previews', () => {
+  const speaking = () => run([{ type: 'START_CONVERSATION' }, { type: 'SPEECH_STARTED' }]);
+
+  it('stores partial transcript and translation while speech is active', () => {
+    let state = speaking();
+    state = reduce(state, { type: 'PARTIAL_TRANSCRIPT', transcript: 'Dónde está' }).state;
+    expect(state.partialTranscript).toBe('Dónde está');
+    expect(state.partialTranslation).toBeNull();
+
+    state = reduce(state, { type: 'PARTIAL_TRANSLATION', translation: 'Where is' }).state;
+    expect(state.partialTranslation).toBe('Where is');
+
+    // A newer partial transcript keeps the previous translation on screen
+    // until the fresher one arrives.
+    state = reduce(state, {
+      type: 'PARTIAL_TRANSCRIPT',
+      transcript: 'Dónde está la estación',
+    }).state;
+    expect(state.partialTranscript).toBe('Dónde está la estación');
+    expect(state.partialTranslation).toBe('Where is');
+  });
+
+  it('ignores partials when nobody is speaking', () => {
+    const listening = run([{ type: 'START_CONVERSATION' }]);
+    const { state } = reduce(listening, { type: 'PARTIAL_TRANSCRIPT', transcript: 'ghost' });
+    expect(state.partialTranscript).toBeNull();
+
+    const noTranscript = reduce(speaking(), {
+      type: 'PARTIAL_TRANSLATION',
+      translation: 'orphan',
+    });
+    expect(noTranscript.state.partialTranslation).toBeNull();
+  });
+
+  it('keeps the last partial through UTTERANCE_COMPLETED for the transcribing screen', () => {
+    let state = speaking();
+    state = reduce(state, { type: 'PARTIAL_TRANSCRIPT', transcript: 'Dónde está' }).state;
+    state = reduce(state, { type: 'UTTERANCE_COMPLETED', requestId: 'r1' }).state;
+    expect(state.status).toBe('PROCESSING_THEM');
+    expect(state.partialTranscript).toBe('Dónde está');
+  });
+
+  it('replaces the partial with the authoritative final transcript', () => {
+    let state = speaking();
+    state = reduce(state, { type: 'PARTIAL_TRANSCRIPT', transcript: 'Dónde está' }).state;
+    state = reduce(state, { type: 'UTTERANCE_COMPLETED', requestId: 'r1' }).state;
+    state = reduce(state, {
+      type: 'TRANSCRIPTION_SUCCEEDED',
+      requestId: 'r1',
+      transcript: '¿Dónde está la estación?',
+    }).state;
+    expect(state.partialTranscript).toBeNull();
+    expect(state.partialTranslation).toBeNull();
+    expect(state.currentTranscript).toBe('¿Dónde está la estación?');
+  });
+
+  it('clears partials on a new utterance, toggle, offline and completion', () => {
+    const withPartial = () => {
+      let state = speaking();
+      state = reduce(state, { type: 'PARTIAL_TRANSCRIPT', transcript: 'so far' }).state;
+      return state;
+    };
+
+    expect(reduce(withPartial(), { type: 'SPEECH_STARTED' }).state.partialTranscript).toBeNull();
+    expect(reduce(withPartial(), { type: 'TOGGLE_DIRECTION' }).state.partialTranscript).toBeNull();
+    expect(reduce(withPartial(), { type: 'NETWORK_OFFLINE' }).state.partialTranscript).toBeNull();
+    expect(reduce(withPartial(), { type: 'END_CONVERSATION' }).state.partialTranscript).toBeNull();
+
+    let state = reduce(withPartial(), { type: 'UTTERANCE_COMPLETED', requestId: 'r1' }).state;
+    state = reduce(state, { type: 'TRANSCRIPTION_SUCCEEDED', requestId: 'r1', transcript: 'x' })
+      .state;
+    state = reduce(state, { type: 'PROCESSING_SUCCEEDED', requestId: 'r1', turn: makeTurn() })
+      .state;
+    expect(state.partialTranscript).toBeNull();
+    expect(state.partialTranslation).toBeNull();
+  });
+});
+
 describe('exit and end', () => {
   it('EXIT cancels everything and shuts down', () => {
     const processing = run([

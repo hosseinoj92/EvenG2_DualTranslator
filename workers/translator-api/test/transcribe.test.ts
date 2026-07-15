@@ -132,9 +132,16 @@ describe('POST /api/v1/transcribe — validation', () => {
     expect(body.error.code).toBe('AUDIO_TOO_LARGE');
   });
 
+  it('accepts long utterances up to the 30 s recording cap', async () => {
+    const app = buildApp();
+    const long = new File([makeWavBytes(30_000)], 'utterance.wav', { type: 'audio/wav' });
+    const response = await app(makeTranscribeRequest({ audio: long }));
+    expect(response.status).toBe(200);
+  });
+
   it('rejects utterances longer than the limit', async () => {
     const app = buildApp();
-    const tooLong = new File([makeWavBytes(20_000)], 'utterance.wav', { type: 'audio/wav' });
+    const tooLong = new File([makeWavBytes(40_000)], 'utterance.wav', { type: 'audio/wav' });
     const response = await app(makeTranscribeRequest({ audio: tooLong }));
     expect(response.status).toBe(400);
     const body = await readJson<ApiErrorResponse>(response);

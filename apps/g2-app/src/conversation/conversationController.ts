@@ -5,12 +5,18 @@
  * after every transition.
  *
  * Spoken audio is processed in two explicit stages, one chain per utterance:
- *   1. `transcribeFinal` — exactly one transcription request per completed
- *      utterance (never partial, never periodic);
+ *   1. `transcribeFinal` — one authoritative transcription of the completed
+ *      utterance;
  *   2. `translateText` — runs only after the transcript is back and visible.
  * Both stages share one AbortController and one requestId, so a toggle,
  * offline transition, exit or disposal cancels whichever stage is active and
  * stale responses are dropped by the reducer's requestId check.
+ *
+ * While the speaker is still talking, an optional live-preview loop
+ * (config.livePreview) additionally transcribes and translates the
+ * audio-so-far every interval so long sentences appear incrementally. At most
+ * one preview is in flight at a time, previews never touch the final chain or
+ * the error state, and the final full-utterance pass always wins.
  */
 
 import type { ConversationDirection, LanguageCode } from '@turntranslate/shared';
@@ -57,6 +63,11 @@ export class ConversationController {
 
   private abortController: AbortController | null = null;
   private resumeTimer: ReturnType<typeof setTimeout> | null = null;
+  private previewTimer: ReturnType<typeof setInterval> | null = null;
+  private previewAbort: AbortController | null = null;
+  private previewBusy = false;
+  /** Bumped on every speech start; stale preview results are dropped by it. */
+  private utteranceGeneration = 0;
   private pendingUtterance: Uint8Array | null = null;
   private lastFailedUtterance: Uint8Array | null = null;
   private lastFailedTranslation: FailedTranslationContext | null = null;
@@ -70,7 +81,11 @@ export class ConversationController {
     this.state = initialMachineState(typeof navigator === 'undefined' ? true : navigator.onLine);
     this.settings = deps.settings;
     this.vad = new VoiceActivityDetector(deps.config.vad, {
-      onSpeechStart: () => this.dispatch({ type: 'SPEECH_STARTED' }),
+      onSpeechStart: () => {
+        this.utteranceGeneration += 1;
+        this.dispatch({ type: 'SPEECH_STARTED' });
+        this.startPreviewLoop();
+      },
       onUtterance: (pcm) => this.handleUtterance(pcm),
       onRejected: () => {
         // Too-short blips are dropped silently; the app keeps listening.
@@ -110,6 +125,8 @@ export class ConversationController {
       speechActive: this.state.speechActive,
       processingPhase: this.state.processingPhase,
       currentTranscript: this.state.currentTranscript,
+      partialTranscript: this.state.partialTranscript,
+      partialTranslation: this.state.partialTranslation,
       history: [...this.state.history],
       historyIndex: this.state.historyIndex,
       latestTurn: latestTurn(this.state.history),
@@ -218,6 +235,7 @@ export class ConversationController {
     this.toggleDebounced.cancel();
     this.cancelActiveRequest();
     this.clearResumeTimer();
+    this.stopPreviewLoop();
     this.vad.reset();
     this.pendingUtterance = null;
     this.lastFailedUtterance = null;
@@ -246,6 +264,9 @@ export class ConversationController {
         this.setMic(effect.open);
         break;
       case 'RESET_VAD':
+        // Resetting the VAD abandons any in-progress utterance, so its
+        // preview loop (and in-flight preview request) dies with it.
+        this.stopPreviewLoop();
         this.vad.reset();
         break;
       case 'CANCEL_ACTIVE_REQUEST':
@@ -282,8 +303,92 @@ export class ConversationController {
   }
 
   private handleUtterance(pcm: Uint8Array): void {
+    // The utterance is complete: previews stop, the final chain takes over.
+    this.stopPreviewLoop();
     this.pendingUtterance = pcm;
     this.dispatch({ type: 'UTTERANCE_COMPLETED', requestId: makeId() });
+  }
+
+  // ----- live preview (audio-so-far, best effort) ---------------------------
+
+  private startPreviewLoop(): void {
+    const preview = this.deps.config.livePreview;
+    if (!preview.enabled) return;
+    this.stopPreviewLoop();
+    this.previewTimer = setInterval(() => this.runPreviewPass(), preview.intervalMs);
+  }
+
+  private stopPreviewLoop(): void {
+    if (this.previewTimer !== null) {
+      clearInterval(this.previewTimer);
+      this.previewTimer = null;
+    }
+    this.previewAbort?.abort();
+    this.previewAbort = null;
+    this.previewBusy = false;
+  }
+
+  /**
+   * One preview pass: transcribe the audio recorded so far, show it, then
+   * translate it and show that too. Previews are strictly best-effort: at
+   * most one is in flight, failures are silent, and results are dropped when
+   * the utterance they belong to is no longer the live one.
+   */
+  private runPreviewPass(): void {
+    if (this.previewBusy) return;
+    if (this.state.status !== 'LISTENING_TO_THEM' && this.state.status !== 'LISTENING_TO_ME') {
+      this.stopPreviewLoop();
+      return;
+    }
+
+    const pcm = this.vad.snapshotUtterance();
+    const { sampleRateHz, bitsPerSample, channels } = this.deps.config.audio;
+    const minBytes =
+      ((sampleRateHz * (bitsPerSample / 8) * channels) / 1000) *
+      this.deps.config.livePreview.minAudioMs;
+    if (!pcm || pcm.length < minBytes) return;
+
+    const generation = this.utteranceGeneration;
+    const direction = this.state.direction;
+    const { sourceLanguage, targetLanguage } = this.languagesFor(direction);
+    const wav = encodeWav(pcm, this.deps.config.audio);
+    const controller = new AbortController();
+    this.previewAbort = controller;
+    this.previewBusy = true;
+
+    const pass = async (): Promise<void> => {
+      try {
+        const transcription = await this.deps.client.transcribeFinal({
+          wav,
+          sourceLanguage,
+          requestId: makeId(),
+          signal: controller.signal,
+        });
+        if (generation !== this.utteranceGeneration || controller.signal.aborted) return;
+        this.dispatch({ type: 'PARTIAL_TRANSCRIPT', transcript: transcription.transcript });
+
+        const translationRequestId = makeId();
+        const response = await this.deps.client.translateText({
+          text: transcription.transcript,
+          sourceLanguage,
+          targetLanguage,
+          direction,
+          requestId: translationRequestId,
+          signal: controller.signal,
+        });
+        if (generation !== this.utteranceGeneration || controller.signal.aborted) return;
+        this.dispatch({ type: 'PARTIAL_TRANSLATION', translation: response.translation });
+      } catch {
+        // Preview failures are invisible: the final chain is authoritative
+        // and its own error handling covers real problems.
+      } finally {
+        this.previewBusy = false;
+        if (this.previewAbort === controller) {
+          this.previewAbort = null;
+        }
+      }
+    };
+    void pass();
   }
 
   /**

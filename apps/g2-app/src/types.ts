@@ -56,6 +56,10 @@ export interface AppSnapshot {
    * (transcription finished, translation pending or failed); null otherwise.
    */
   currentTranscript: string | null;
+  /** Live preview of the sentence still being spoken (best effort). */
+  partialTranscript: string | null;
+  /** Live preview translation of `partialTranscript` (best effort). */
+  partialTranslation: string | null;
   history: ConversationTurn[];
   historyIndex: number | null;
   latestTurn: ConversationTurn | null;

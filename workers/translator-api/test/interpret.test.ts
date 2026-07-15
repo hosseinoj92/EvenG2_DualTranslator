@@ -94,7 +94,7 @@ describe('POST /api/v1/interpret — validation', () => {
 
   it('rejects utterances longer than the limit', async () => {
     const app = buildApp();
-    const tooLong = new File([makeWavBytes(20_000)], 'utterance.wav', {
+    const tooLong = new File([makeWavBytes(40_000)], 'utterance.wav', {
       type: 'audio/wav',
     });
     const response = await app(makeInterpretRequest({ audio: tooLong }));

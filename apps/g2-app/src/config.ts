@@ -60,21 +60,41 @@ export const appConfig = {
     preRollMs: 250,
     /** Utterances shorter than this are rejected as noise. */
     minimumSpeechMs: 300,
-    /** Sustained silence that ends an utterance. */
-    endSilenceMs: 700,
+    /**
+     * Sustained silence that ends an utterance. Generous on purpose: people
+     * breathe and pause to think mid-sentence, and a natural pause must not
+     * split one thought into two premature translations.
+     */
+    endSilenceMs: 1_500,
     /** Hard stop: force-finish the utterance at this length. */
-    maximumUtteranceMs: 12_000,
+    maximumUtteranceMs: 30_000,
     /** Normalized RMS a frame must exceed to count as speech. */
     rmsThreshold: 0.015,
     /** Consecutive speech frames required to enter recording (rejects clicks). */
     speechStartFrameCount: 3,
   },
 
+  /**
+   * Live preview while someone is speaking: every `intervalMs` the audio
+   * captured so far is transcribed and translated, so long sentences appear
+   * incrementally instead of only after the speaker finishes. Previews are
+   * best-effort — the final full-utterance transcription stays authoritative.
+   * Each preview is a billed Workers AI call; set `enabled: false` to return
+   * to strict one-request-per-utterance behaviour.
+   */
+  livePreview: {
+    enabled: true as boolean,
+    /** How often the audio-so-far is sent for a preview pass. */
+    intervalMs: 1_500,
+    /** Skip previews until at least this much audio has accumulated. */
+    minAudioMs: 1_200,
+  },
+
   conversation: {
     /** Ignore direction-toggle clicks arriving faster than this. */
     toggleDebounceMs: 400,
     /** How long an incoming translation stays "fresh" before auto-resuming listening. */
-    incomingResultResumeDelayMs: 6_000,
+    incomingResultResumeDelayMs: 30_000,
     /** In-memory conversation history cap. */
     maxHistoryItems: 20,
   },
