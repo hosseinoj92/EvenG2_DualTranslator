@@ -629,23 +629,45 @@ describe('two-stage processing phases and transient transcript', () => {
 describe('live partial previews', () => {
   const speaking = () => run([{ type: 'START_CONVERSATION' }, { type: 'SPEECH_STARTED' }]);
 
-  it('stores partial transcript and translation while speech is active', () => {
+  it('stores partial previews and clears an outdated translation when the transcript changes', () => {
     let state = speaking();
-    state = reduce(state, { type: 'PARTIAL_TRANSCRIPT', transcript: 'Dónde está' }).state;
+
+    // First partial transcript arrives.
+    state = reduce(state, {
+      type: 'PARTIAL_TRANSCRIPT',
+      transcript: 'Dónde está',
+    }).state;
+
     expect(state.partialTranscript).toBe('Dónde está');
     expect(state.partialTranslation).toBeNull();
 
-    state = reduce(state, { type: 'PARTIAL_TRANSLATION', translation: 'Where is' }).state;
+    // Translation corresponding to the first transcript arrives.
+    state = reduce(state, {
+      type: 'PARTIAL_TRANSLATION',
+      translation: 'Where is',
+    }).state;
+
+    expect(state.partialTranscript).toBe('Dónde está');
     expect(state.partialTranslation).toBe('Where is');
 
-    // A newer partial transcript keeps the previous translation on screen
-    // until the fresher one arrives.
+    // Whisper produces a newer, longer transcript. The previous translation
+    // belongs to the older transcript and must therefore be removed.
     state = reduce(state, {
       type: 'PARTIAL_TRANSCRIPT',
       transcript: 'Dónde está la estación',
     }).state;
+
     expect(state.partialTranscript).toBe('Dónde está la estación');
-    expect(state.partialTranslation).toBe('Where is');
+    expect(state.partialTranslation).toBeNull();
+
+    // The fresh translation corresponding to the newer transcript arrives.
+    state = reduce(state, {
+      type: 'PARTIAL_TRANSLATION',
+      translation: 'Where is the station',
+    }).state;
+
+    expect(state.partialTranscript).toBe('Dónde está la estación');
+    expect(state.partialTranslation).toBe('Where is the station');
   });
 
   it('ignores partials when nobody is speaking', () => {
