@@ -74,28 +74,9 @@ export const appConfig = {
     speechStartFrameCount: 3,
   },
 
-  /**
-   * Live preview while someone is speaking: every `intervalMs` the audio
-   * captured so far is transcribed and translated, so long sentences appear
-   * incrementally instead of only after the speaker finishes. Previews are
-   * best-effort — the final full-utterance transcription stays authoritative.
-   * Each preview is a billed Workers AI call; set `enabled: false` to return
-   * to strict one-request-per-utterance behaviour.
-   */
-  livePreview: {
-    enabled: true as boolean,
-    intervalMs: 1_500,
-    minAudioMs: 1_200,
-
-    /** Maximum cumulative preview passes before the authoritative final pass. */
-    maxPreviewRequestsPerUtterance: 8,
-  },
-
   conversation: {
     /** Ignore direction-toggle clicks arriving faster than this. */
     toggleDebounceMs: 400,
-    /** How long an incoming translation stays "fresh" before auto-resuming listening. */
-    incomingResultResumeDelayMs: 20_000,
     /** In-memory conversation history cap. */
     maxHistoryItems: 20,
   },

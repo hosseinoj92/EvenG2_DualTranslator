@@ -1,22 +1,17 @@
 /**
  * Imperative shell around the pure conversation machine. Dispatches events,
- * executes the effects the reducer returns (mic, requests, timers, shutdown)
- * and publishes an AppSnapshot to subscribers (glasses display + phone UI)
+ * executes the effects the reducer returns (mic, requests, shutdown) and
+ * publishes an AppSnapshot to subscribers (glasses display + phone UI)
  * after every transition.
  *
- * Spoken audio is processed in two explicit stages, one chain per utterance:
+ * Spoken audio is processed strictly sequentially, exactly one chain per
+ * completed utterance and nothing while the speaker is still talking:
  *   1. `transcribeFinal` — one authoritative transcription of the completed
  *      utterance;
  *   2. `translateText` — runs only after the transcript is back and visible.
  * Both stages share one AbortController and one requestId, so a toggle,
  * offline transition, exit or disposal cancels whichever stage is active and
  * stale responses are dropped by the reducer's requestId check.
- *
- * While the speaker is still talking, an optional live-preview loop
- * (config.livePreview) additionally transcribes and translates the
- * audio-so-far every interval so long sentences appear incrementally. At most
- * one preview is in flight at a time, previews never touch the final chain or
- * the error state, and the final full-utterance pass always wins.
  */
 
 import type { ConversationDirection, LanguageCode } from '@turntranslate/shared';
@@ -62,18 +57,7 @@ export class ConversationController {
   private readonly toggleDebounced: LeadingDebounced<[]>;
 
   private abortController: AbortController | null = null;
-  private resumeTimer: ReturnType<typeof setTimeout> | null = null;
 
-  // Live-preview state. At most one preview request is active. While it runs,
-  // only the newest cumulative PCM snapshot is retained.
-  private previewTimer: ReturnType<typeof setInterval> | null = null;
-  private previewAbort: AbortController | null = null;
-  private queuedPreviewPcm: Uint8Array | null = null;
-  private previewRequestsUsed = 0;
-  private lastPreviewBytesSubmitted = 0;
-
-  /** Bumped on every speech start; stale preview results are dropped by it. */
-  private utteranceGeneration = 0;
   private pendingUtterance: Uint8Array | null = null;
   private lastFailedUtterance: Uint8Array | null = null;
   private lastFailedTranslation: FailedTranslationContext | null = null;
@@ -88,9 +72,7 @@ export class ConversationController {
     this.settings = deps.settings;
     this.vad = new VoiceActivityDetector(deps.config.vad, {
       onSpeechStart: () => {
-        this.utteranceGeneration += 1;
         this.dispatch({ type: 'SPEECH_STARTED' });
-        this.startPreviewLoop();
       },
       onUtterance: (pcm) => this.handleUtterance(pcm),
       onRejected: () => {
@@ -131,8 +113,6 @@ export class ConversationController {
       speechActive: this.state.speechActive,
       processingPhase: this.state.processingPhase,
       currentTranscript: this.state.currentTranscript,
-      partialTranscript: this.state.partialTranscript,
-      partialTranslation: this.state.partialTranslation,
       history: [...this.state.history],
       historyIndex: this.state.historyIndex,
       latestTurn: latestTurn(this.state.history),
@@ -219,8 +199,6 @@ export class ConversationController {
     // protects direct calls.
     if (this.state.conversationActive) return;
 
-    this.utteranceGeneration += 1;
-    this.stopPreviewLoop();
     this.vad.reset();
 
     this.settings = settings;
@@ -249,8 +227,6 @@ export class ConversationController {
     this.disposed = true;
     this.toggleDebounced.cancel();
     this.cancelActiveRequest();
-    this.clearResumeTimer();
-    this.stopPreviewLoop();
     this.vad.reset();
     this.pendingUtterance = null;
     this.lastFailedUtterance = null;
@@ -279,9 +255,6 @@ export class ConversationController {
         this.setMic(effect.open);
         break;
       case 'RESET_VAD':
-        // Resetting the VAD abandons any in-progress utterance, so its
-        // preview loop (and in-flight preview request) dies with it.
-        this.stopPreviewLoop();
         this.vad.reset();
         break;
       case 'CANCEL_ACTIVE_REQUEST':
@@ -301,16 +274,6 @@ export class ConversationController {
       case 'RETRY_TRANSLATION':
         this.beginTranslationRetry(effect.requestId);
         break;
-      case 'SCHEDULE_RESUME':
-        this.clearResumeTimer();
-        this.resumeTimer = setTimeout(() => {
-          this.resumeTimer = null;
-          this.dispatch({ type: 'RESULT_DISPLAY_ELAPSED' });
-        }, this.deps.config.conversation.incomingResultResumeDelayMs);
-        break;
-      case 'CANCEL_RESUME':
-        this.clearResumeTimer();
-        break;
       case 'SHUTDOWN':
         this.shutdown();
         break;
@@ -318,172 +281,8 @@ export class ConversationController {
   }
 
   private handleUtterance(pcm: Uint8Array): void {
-    // The utterance is complete: previews stop, the final chain takes over.
-    this.stopPreviewLoop();
     this.pendingUtterance = pcm;
     this.dispatch({ type: 'UTTERANCE_COMPLETED', requestId: makeId() });
-  }
-
-  // ----- live preview (audio-so-far, best effort) ---------------------------
-
-  private static readonly MAX_PREVIEW_REQUESTS_PER_UTTERANCE = 13;
-
-  private startPreviewLoop(): void {
-    const preview = this.deps.config.livePreview;
-
-    // Clear any preview state left by an older utterance.
-    this.stopPreviewLoop();
-    this.previewRequestsUsed = 0;
-    this.lastPreviewBytesSubmitted = 0;
-
-    if (!preview.enabled) return;
-
-    this.previewTimer = setInterval(() => this.capturePreviewSnapshot(), preview.intervalMs);
-  }
-
-  private stopPreviewLoop(): void {
-    if (this.previewTimer !== null) {
-      clearInterval(this.previewTimer);
-      this.previewTimer = null;
-    }
-
-    this.previewAbort?.abort();
-    this.previewAbort = null;
-    this.queuedPreviewPcm = null;
-  }
-
-  /**
-   * Capture the newest cumulative utterance snapshot.
-   *
-   * When a preview is already active, retain only the latest snapshot. This
-   * prevents concurrent Cloudflare requests while also avoiding falling behind
-   * during long sentences.
-   */
-  private capturePreviewSnapshot(): void {
-    const isListening =
-      this.state.status === 'LISTENING_TO_THEM' || this.state.status === 'LISTENING_TO_ME';
-
-    if (!isListening || !this.state.speechActive) {
-      this.stopPreviewLoop();
-      return;
-    }
-
-    if (this.previewRequestsUsed >= ConversationController.MAX_PREVIEW_REQUESTS_PER_UTTERANCE) {
-      return;
-    }
-
-    const pcm = this.vad.snapshotUtterance();
-    const { sampleRateHz, bitsPerSample, channels } = this.deps.config.audio;
-    const minBytes =
-      ((sampleRateHz * (bitsPerSample / 8) * channels) / 1000) *
-      this.deps.config.livePreview.minAudioMs;
-
-    if (!pcm || pcm.length < minBytes) return;
-    if (pcm.length <= this.lastPreviewBytesSubmitted) return;
-
-    if (this.previewAbort !== null) {
-      if (this.queuedPreviewPcm === null || pcm.length > this.queuedPreviewPcm.length) {
-        this.queuedPreviewPcm = pcm;
-      }
-      return;
-    }
-
-    this.startPreviewPass(pcm);
-  }
-
-  /**
-   * Transcribe and translate one cumulative audio snapshot.
-   *
-   * Only the active preview operation may update preview ownership. Results
-   * from an aborted or superseded operation are ignored.
-   */
-  private startPreviewPass(pcm: Uint8Array): void {
-    if (this.previewAbort !== null) return;
-
-    if (this.previewRequestsUsed >= ConversationController.MAX_PREVIEW_REQUESTS_PER_UTTERANCE) {
-      return;
-    }
-
-    const isListening =
-      this.state.status === 'LISTENING_TO_THEM' || this.state.status === 'LISTENING_TO_ME';
-
-    if (!isListening || !this.state.speechActive) return;
-
-    const generation = this.utteranceGeneration;
-    const { sourceLanguage } = this.languagesFor(this.state.direction);
-    const controller = new AbortController();
-    const wav = encodeWav(pcm, this.deps.config.audio);
-
-    this.previewAbort = controller;
-    this.previewRequestsUsed += 1;
-    this.lastPreviewBytesSubmitted = pcm.length;
-
-    const operationIsCurrent = (): boolean =>
-      this.previewAbort === controller &&
-      generation === this.utteranceGeneration &&
-      !controller.signal.aborted &&
-      this.state.speechActive &&
-      (this.state.status === 'LISTENING_TO_THEM' || this.state.status === 'LISTENING_TO_ME');
-
-    const pass = async (): Promise<void> => {
-      try {
-        /*
-         * Live previews are transcription-only.
-         *
-         * Translation is deliberately not requested here. A translated sentence
-         * is shown only after the completed utterance has passed through the
-         * authoritative final transcription and final translation chain.
-         */
-        const transcription = await this.deps.client.transcribeFinal({
-          wav,
-          sourceLanguage,
-          requestId: makeId(),
-          signal: controller.signal,
-        });
-
-        if (!operationIsCurrent()) return;
-
-        const transcript = transcription.transcript.trim();
-        if (transcript.length === 0) return;
-
-        this.dispatch({
-          type: 'PARTIAL_TRANSCRIPT',
-          transcript,
-        });
-      } catch {
-        /*
-         * Preview failures are intentionally nonfatal. The completed utterance
-         * still receives its authoritative final transcription and translation.
-         */
-      } finally {
-        /*
-         * Only the operation that still owns previewAbort may clear the current
-         * preview state or start the queued preview. An older aborted operation does
-         * nothing here.
-         */
-        if (this.previewAbort === controller) {
-          this.previewAbort = null;
-
-          const queued = this.queuedPreviewPcm;
-          this.queuedPreviewPcm = null;
-
-          const canContinue =
-            queued !== null &&
-            queued.length > this.lastPreviewBytesSubmitted &&
-            generation === this.utteranceGeneration &&
-            this.state.speechActive &&
-            (this.state.status === 'LISTENING_TO_THEM' ||
-              this.state.status === 'LISTENING_TO_ME') &&
-            this.previewRequestsUsed < ConversationController.MAX_PREVIEW_REQUESTS_PER_UTTERANCE;
-
-          if (canContinue) {
-            this.startPreviewPass(queued);
-          }
-        }
-      }
-    };
-
-    void pass();
   }
 
   /**
@@ -724,13 +523,6 @@ export class ConversationController {
   private cancelActiveRequest(): void {
     this.abortController?.abort();
     this.abortController = null;
-  }
-
-  private clearResumeTimer(): void {
-    if (this.resumeTimer !== null) {
-      clearTimeout(this.resumeTimer);
-      this.resumeTimer = null;
-    }
   }
 
   private setMic(open: boolean): void {

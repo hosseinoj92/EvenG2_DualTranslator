@@ -176,28 +176,25 @@ export function mountCompanionUi(root: HTMLElement, callbacks: CompanionUiCallba
   }
 
   /**
-   * The two-stage pipeline is mirrored here: while transcribing only a
-   * placeholder shows; as soon as the transcript is in it appears with
-   * "Translating…" underneath; the completed turn then shows both texts.
-   * All conversation text is rendered via textContent — never innerHTML.
+   * The sequential pipeline is mirrored here: Listening… while someone
+   * speaks, a placeholder while transcribing, then the completed transcript
+   * with "Translating…" underneath, then both texts. No partial transcript
+   * or translation ever appears. All conversation text is rendered via
+   * textContent — never innerHTML.
    */
   function renderResult(snapshot: AppSnapshot): void {
-    // Live preview while someone is still speaking: what has been said so
-    // far, refreshed every preview interval, with its translation underneath.
     if (
-      snapshot.partialTranscript !== null &&
+      snapshot.speechActive &&
       (snapshot.status === 'LISTENING_TO_THEM' || snapshot.status === 'LISTENING_TO_ME')
     ) {
       resultSpeaker.textContent = speakerLabel(snapshot.direction);
-      sourceText.textContent = snapshot.partialTranscript;
-
-      // No translated text is displayed until the final translation completes.
+      sourceText.textContent = 'Listening…';
       translatedText.textContent = '';
       return;
     }
     if (snapshot.processingPhase === 'transcribing') {
       resultSpeaker.textContent = speakerLabel(snapshot.direction);
-      sourceText.textContent = snapshot.partialTranscript ?? 'Processing speech…';
+      sourceText.textContent = 'Processing speech…';
 
       // The authoritative translation has not started yet.
       translatedText.textContent = '';
@@ -339,9 +336,9 @@ function statusHint(snapshot: AppSnapshot): string {
     case 'SETUP':
       return 'Press “Start conversation”, then hand the first word to the other person.';
     case 'LISTENING_TO_THEM':
-      return snapshot.speechActive ? 'Hearing them…' : 'Listening for the other person…';
+      return snapshot.speechActive ? 'Listening…' : 'Listening for the other person…';
     case 'LISTENING_TO_ME':
-      return snapshot.speechActive ? 'Hearing you…' : 'Speak now — your words will be translated.';
+      return snapshot.speechActive ? 'Listening…' : 'Speak now — your words will be translated.';
     case 'PROCESSING_THEM':
     case 'PROCESSING_ME':
       return snapshot.processingPhase === 'transcribing' ? 'Processing speech…' : 'Translating…';

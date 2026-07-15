@@ -231,7 +231,7 @@ describe('two-stage voice chain', () => {
     controller.dispose();
   });
 
-  it('incoming completion resumes listening after the display delay', async () => {
+  it('the incoming result remains indefinitely: no timer ever resumes listening', async () => {
     vi.useFakeTimers();
     const client = new MockClient();
     const controller = makeController(client);
@@ -244,8 +244,28 @@ describe('two-stage voice chain', () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(controller.snapshot().status).toBe('SHOWING_THEM_RESULT');
 
-    await vi.advanceTimersByTimeAsync(appConfig.conversation.incomingResultResumeDelayMs + 10);
-    expect(controller.snapshot().status).toBe('LISTENING_TO_THEM');
+    // Far beyond any of the old 6/20/30-second delays: nothing changes and
+    // the microphone stays closed.
+    await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+    expect(controller.snapshot().status).toBe('SHOWING_THEM_RESULT');
+    expect(controller.snapshot().micOpen).toBe(false);
+    controller.dispose();
+  });
+
+  it('R1 from the incoming result switches to LISTENING_TO_ME', async () => {
+    const client = new MockClient();
+    const controller = makeController(client);
+    controller.startConversation();
+    speak(controller);
+    client.resolveTranscription(0, 'hola');
+    await flush();
+    client.resolveTranslation(0, 'hello');
+    await flush();
+    expect(controller.snapshot().status).toBe('SHOWING_THEM_RESULT');
+
+    controller.toggleDirection();
+    expect(controller.snapshot().status).toBe('LISTENING_TO_ME');
+    expect(controller.snapshot().micOpen).toBe(true);
     controller.dispose();
   });
 
@@ -273,192 +293,73 @@ describe('two-stage voice chain', () => {
     expect(client.transcribeCalls).toHaveLength(1);
     controller.dispose();
   });
+
+  it('the outgoing result remains indefinitely; R1 returns to LISTENING_TO_THEM', async () => {
+    vi.useFakeTimers();
+    const client = new MockClient();
+    const controller = makeController(client);
+    controller.startConversation();
+    controller.toggleDirection();
+    speak(controller);
+    client.resolveTranscription(0, 'Where is the station?');
+    await vi.advanceTimersByTimeAsync(0);
+    client.resolveTranslation(0, '¿Dónde está la estación?');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(controller.snapshot().status).toBe('READ_ALOUD_PAUSED');
+
+    // No timer of any kind moves the app on; the mic stays closed.
+    await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+    expect(controller.snapshot().status).toBe('READ_ALOUD_PAUSED');
+    expect(controller.snapshot().micOpen).toBe(false);
+
+    controller.toggleDirection();
+    expect(controller.snapshot().status).toBe('LISTENING_TO_THEM');
+    expect(controller.snapshot().micOpen).toBe(true);
+    controller.dispose();
+  });
 });
 
-describe('live preview while speaking', () => {
+describe('no requests while speech is still active', () => {
   /** Enter recording and keep speaking (no closing silence). */
   function speakWithoutFinishing(controller: ConversationController, frames = 75): void {
     for (let i = 0; i < frames; i += 1) controller.handleAudioFrame(pcmFrame(8000));
   }
 
-  it('previews transcription only, then shows translation after the final pass', async () => {
+  it('sends no transcription and no translation while the speaker is still talking', async () => {
     vi.useFakeTimers();
-
     const client = new MockClient();
     const controller = makeController(client);
-
     controller.startConversation();
     speakWithoutFinishing(controller);
+    expect(controller.snapshot().speechActive).toBe(true);
 
-    expect(client.transcribeCalls).toHaveLength(0);
-    expect(client.translateCalls).toHaveLength(0);
-
-    // First live preview: transcription only.
-    await vi.advanceTimersByTimeAsync(appConfig.livePreview.intervalMs);
-
-    expect(client.transcribeCalls).toHaveLength(1);
-    expect(client.translateCalls).toHaveLength(0);
-
-    client.resolveTranscription(0, 'Dónde está la');
-    await vi.advanceTimersByTimeAsync(0);
-
-    expect(controller.snapshot().partialTranscript).toBe('Dónde está la');
-    expect(controller.snapshot().partialTranslation).toBeNull();
-    expect(controller.snapshot().status).toBe('LISTENING_TO_THEM');
-
-    // A live preview must never request translation.
-    expect(client.translateCalls).toHaveLength(0);
-
-    // Speaker finishes. The authoritative final chain starts.
-    const silentFrames = Math.ceil(appConfig.vad.endSilenceMs / appConfig.vad.frameMs) + 2;
-
-    for (let i = 0; i < silentFrames; i += 1) {
-      controller.handleAudioFrame(pcmFrame(0));
+    // No interval, snapshot timer or preview pass exists: however long the
+    // speech goes on, no request of any kind is made.
+    for (let i = 0; i < 8; i += 1) {
+      await vi.advanceTimersByTimeAsync(1_500);
+      speakWithoutFinishing(controller);
     }
-
-    // Preview transcription + final transcription.
-    expect(client.transcribeCalls).toHaveLength(2);
-
-    client.resolveTranscription(1, '¿Dónde está la estación?');
-    await vi.advanceTimersByTimeAsync(0);
-
-    expect(controller.snapshot().currentTranscript).toBe('¿Dónde está la estación?');
-    expect(controller.snapshot().partialTranscript).toBeNull();
-
-    // Translation begins only after final transcription.
-    expect(client.translateCalls).toHaveLength(1);
-    expect(client.translateCalls[0]!.text).toBe('¿Dónde está la estación?');
-
-    client.resolveTranslation(0, 'Where is the station?');
-    await vi.advanceTimersByTimeAsync(0);
-
-    expect(controller.snapshot().latestTurn?.transcript).toBe('¿Dónde está la estación?');
-    expect(controller.snapshot().latestTurn?.translation).toBe('Where is the station?');
-    expect(controller.snapshot().history).toHaveLength(1);
-
-    controller.dispose();
-  });
-
-  it('keeps one preview active and queues only the newest audio snapshot', async () => {
-    vi.useFakeTimers();
-
-    const client = new MockClient();
-    const controller = makeController(client);
-
-    controller.startConversation();
-
-    // First 1.5 seconds of continuous speech.
-    speakWithoutFinishing(controller);
-
-    // The first timer tick starts preview 1.
-    await vi.advanceTimersByTimeAsync(appConfig.livePreview.intervalMs);
-
-    expect(client.transcribeCalls).toHaveLength(1);
-
-    // The person continues speaking while preview 1 is unresolved.
-    speakWithoutFinishing(controller);
-
-    // The next timer tick captures newer cumulative audio, but it must not
-    // create a concurrent request. It is stored as the queued snapshot.
-    await vi.advanceTimersByTimeAsync(appConfig.livePreview.intervalMs);
-
-    expect(client.transcribeCalls).toHaveLength(1);
-
-    // Complete preview 1.
-    client.resolveTranscription(0, 'so far');
-    await vi.advanceTimersByTimeAsync(0);
-
-    // Preview passes never perform translation.
-    expect(client.translateCalls).toHaveLength(0);
-
-    // Finishing preview transcription immediately starts the newest queued
-    // cumulative snapshot.
-    expect(client.transcribeCalls).toHaveLength(2);
-
-    // Continue speaking while preview 2 is unresolved.
-    speakWithoutFinishing(controller);
-
-    await vi.advanceTimersByTimeAsync(appConfig.livePreview.intervalMs * 3);
-
-    // Further timer ticks may replace the queued snapshot, but they must never
-    // create preview 3 while preview 2 is still active.
-    expect(client.transcribeCalls).toHaveLength(2);
-
-    controller.dispose();
-  });
-
-  it('waits for the minimum audio before sending a preview', async () => {
-    vi.useFakeTimers();
-    const client = new MockClient();
-    const controller = makeController(client);
-    controller.startConversation();
-    speakWithoutFinishing(controller, 20); // only 400 ms of speech so far
-
-    await vi.advanceTimersByTimeAsync(appConfig.livePreview.intervalMs);
     expect(client.transcribeCalls).toHaveLength(0);
-    controller.dispose();
-  });
+    expect(client.translateCalls).toHaveLength(0);
+    expect(client.interpretCalls).toHaveLength(0);
 
-  it('preview failures are silent and never enter the error state', async () => {
-    vi.useFakeTimers();
-    const client = new MockClient();
-    const controller = makeController(client);
-    controller.startConversation();
-    speakWithoutFinishing(controller);
-
-    await vi.advanceTimersByTimeAsync(appConfig.livePreview.intervalMs);
-    client.transcribeResults[0]!.reject(
-      new TranslationClientError('TRANSCRIPTION_FAILED', 'preview failed', true),
-    );
-    await vi.advanceTimersByTimeAsync(0);
-
-    expect(controller.snapshot().status).toBe('LISTENING_TO_THEM');
-    expect(controller.snapshot().error).toBeNull();
-    expect(controller.snapshot().partialTranscript).toBeNull();
-    controller.dispose();
-  });
-
-  it('a stale preview result from a superseded utterance is dropped', async () => {
-    vi.useFakeTimers();
-    const client = new MockClient(false); // Ignores aborts → response arrives late.
-    const controller = makeController(client);
-    controller.startConversation();
-    speakWithoutFinishing(controller);
-
-    await vi.advanceTimersByTimeAsync(appConfig.livePreview.intervalMs);
-    expect(client.transcribeCalls).toHaveLength(1);
-
-    controller.toggleDirection(); // Abandons the utterance and its previews.
-    client.resolveTranscription(0, 'ghost preview');
-    await vi.advanceTimersByTimeAsync(0);
-
-    expect(controller.snapshot().partialTranscript).toBeNull();
-    expect(controller.snapshot().status).toBe('LISTENING_TO_ME');
-    controller.dispose();
-  });
-
-  it('makes no preview requests when live preview is disabled', async () => {
-    vi.useFakeTimers();
-    const client = new MockClient();
-    const config = {
-      ...appConfig,
-      livePreview: { ...appConfig.livePreview, enabled: false },
-    };
-    const controller = new ConversationController({
-      config,
-      client,
-      microphone: null,
-      settings: { myLanguage: 'en', otherLanguage: 'es' },
-    });
-    controller.startConversation();
-    speakWithoutFinishing(controller);
-
-    await vi.advanceTimersByTimeAsync(appConfig.livePreview.intervalMs * 4);
-    expect(client.transcribeCalls).toHaveLength(0); // strict one-request mode
-
+    // Only the completed utterance triggers the single final transcription.
     const silentFrames = Math.ceil(appConfig.vad.endSilenceMs / appConfig.vad.frameMs) + 2;
     for (let i = 0; i < silentFrames; i += 1) controller.handleAudioFrame(pcmFrame(0));
-    expect(client.transcribeCalls).toHaveLength(1); // only the final pass
+    expect(client.transcribeCalls).toHaveLength(1);
+    expect(client.translateCalls).toHaveLength(0); // Not until the transcript is back.
+    controller.dispose();
+  });
+
+  it('snapshots expose no partial transcript or translation fields', () => {
+    const client = new MockClient();
+    const controller = makeController(client);
+    controller.startConversation();
+    speakWithoutFinishing(controller);
+
+    const snapshot = controller.snapshot();
+    expect('partialTranscript' in snapshot).toBe(false);
+    expect('partialTranslation' in snapshot).toBe(false);
     controller.dispose();
   });
 });
@@ -711,6 +612,83 @@ describe('manual typed translation', () => {
     await flush();
     expect(controller.snapshot().status).toBe('SHOWING_THEM_RESULT');
     expect(controller.snapshot().latestTurn?.direction).toBe('them-to-me');
+    controller.dispose();
+  });
+});
+
+describe('full German↔English conversation (integration)', () => {
+  const GERMAN_SOURCE = 'ich habe gestern mit meinem Onkel über deine Klausur gesprochen!';
+  const GERMAN_TRANSLATION = 'Yesterday I talked to my uncle about your exam!';
+  const ENGLISH_SOURCE = 'Yeah, to be honest, I did a very bad job on the exam!';
+  const ENGLISH_TRANSLATION =
+    'Ja, ehrlich gesagt habe ich bei der Klausur sehr schlecht abgeschnitten!';
+
+  it('runs both directions strictly sequentially with one chain per utterance', async () => {
+    const client = new MockClient();
+    const controller = new ConversationController({
+      config: appConfig,
+      client,
+      microphone: null,
+      settings: { myLanguage: 'en', otherLanguage: 'de' },
+    });
+    controller.startConversation();
+
+    // --- The other person speaks German. -----------------------------------
+    speak(controller);
+    expect(controller.snapshot().status).toBe('PROCESSING_THEM');
+    expect(controller.snapshot().processingPhase).toBe('transcribing');
+    expect(client.transcribeCalls).toHaveLength(1);
+    expect(client.transcribeCalls[0]!.sourceLanguage).toBe('de');
+
+    client.resolveTranscription(0, GERMAN_SOURCE);
+    await flush();
+    expect(controller.snapshot().currentTranscript).toBe(GERMAN_SOURCE);
+    expect(controller.snapshot().processingPhase).toBe('translating');
+    expect(client.translateCalls).toHaveLength(1);
+    expect(client.translateCalls[0]!.text).toBe(GERMAN_SOURCE);
+
+    client.resolveTranslation(0, GERMAN_TRANSLATION);
+    await flush();
+    const incoming = controller.snapshot();
+    expect(incoming.status).toBe('SHOWING_THEM_RESULT');
+    expect(incoming.latestTurn?.transcript).toBe(GERMAN_SOURCE);
+    expect(incoming.latestTurn?.translation).toBe(GERMAN_TRANSLATION);
+    expect(incoming.micOpen).toBe(false);
+
+    // --- R1: my turn, I speak English. --------------------------------------
+    controller.toggleDirection();
+    expect(controller.snapshot().status).toBe('LISTENING_TO_ME');
+
+    speak(controller);
+    expect(client.transcribeCalls).toHaveLength(2);
+    expect(client.transcribeCalls[1]!.sourceLanguage).toBe('en');
+
+    client.resolveTranscription(1, ENGLISH_SOURCE);
+    await flush();
+    expect(client.translateCalls).toHaveLength(2);
+    expect(client.translateCalls[1]!.text).toBe(ENGLISH_SOURCE);
+
+    client.resolveTranslation(1, ENGLISH_TRANSLATION);
+    await flush();
+    const outgoing = controller.snapshot();
+    expect(outgoing.status).toBe('READ_ALOUD_PAUSED');
+    expect(outgoing.latestTurn?.transcript).toBe(ENGLISH_SOURCE);
+    expect(outgoing.latestTurn?.translation).toBe(ENGLISH_TRANSLATION);
+    expect(outgoing.micOpen).toBe(false);
+    expect(outgoing.history).toHaveLength(2);
+
+    // --- R1: back to listening to them. --------------------------------------
+    await new Promise((resolve) =>
+      setTimeout(resolve, appConfig.conversation.toggleDebounceMs + 50),
+    );
+    controller.toggleDirection();
+    expect(controller.snapshot().status).toBe('LISTENING_TO_THEM');
+    expect(controller.snapshot().micOpen).toBe(true);
+
+    // Exactly one transcription and one translation per utterance, ever.
+    expect(client.transcribeCalls).toHaveLength(2);
+    expect(client.translateCalls).toHaveLength(2);
+    expect(client.interpretCalls).toHaveLength(0);
     controller.dispose();
   });
 });

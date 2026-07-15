@@ -98,7 +98,7 @@ describe('utterance processing', () => {
     expect(effects).toContainEqual({ type: 'SET_MIC', open: false });
   });
 
-  it('PROCESSING_THEM success shows the result and schedules the resume', () => {
+  it('PROCESSING_THEM success shows the result with no timer effect and the mic closed', () => {
     const processing = run([
       { type: 'START_CONVERSATION' },
       { type: 'UTTERANCE_COMPLETED', requestId: 'req-1' },
@@ -111,17 +111,27 @@ describe('utterance processing', () => {
     expect(state.status).toBe('SHOWING_THEM_RESULT');
     expect(state.history).toHaveLength(1);
     expect(state.activeRequestId).toBeNull();
-    expect(effects).toContainEqual({ type: 'SCHEDULE_RESUME' });
+    // No scheduled resume of any kind and no mic reopening: the result
+    // stays until R1.
+    expect(effects).toEqual([]);
   });
 
-  it('resumes LISTENING_TO_THEM after the result display elapses', () => {
+  it('the incoming result remains indefinitely — only R1 leaves it, into LISTENING_TO_ME', () => {
     const showing = run([
       { type: 'START_CONVERSATION' },
       { type: 'UTTERANCE_COMPLETED', requestId: 'req-1' },
       { type: 'PROCESSING_SUCCEEDED', requestId: 'req-1', turn: makeTurn() },
     ]);
-    const { state, effects } = reduce(showing, { type: 'RESULT_DISPLAY_ELAPSED' });
-    expect(state.status).toBe('LISTENING_TO_THEM');
+
+    // Events that used to be timer-driven no longer exist; unrelated events
+    // are absorbed without a state change or mic activity.
+    const ignored = reduce(showing, { type: 'SPEECH_STARTED' });
+    expect(ignored.state.status).toBe('SHOWING_THEM_RESULT');
+    expect(ignored.effects).toEqual([]);
+
+    const { state, effects } = reduce(showing, { type: 'TOGGLE_DIRECTION' });
+    expect(state.status).toBe('LISTENING_TO_ME');
+    expect(state.direction).toBe('me-to-them');
     expect(effects).toContainEqual({ type: 'SET_MIC', open: true });
   });
 
@@ -264,15 +274,21 @@ describe('errors and retry', () => {
 });
 
 describe('history browsing', () => {
+  // Results only leave via R1: toggle to me and back to return to listening.
+  const backToListening: ConversationEvent[] = [
+    { type: 'TOGGLE_DIRECTION' },
+    { type: 'TOGGLE_DIRECTION' },
+  ];
+
   const withTwoTurns = () =>
     run([
       { type: 'START_CONVERSATION' },
       { type: 'UTTERANCE_COMPLETED', requestId: 'r1' },
       { type: 'PROCESSING_SUCCEEDED', requestId: 'r1', turn: makeTurn({ id: 't1' }) },
-      { type: 'RESULT_DISPLAY_ELAPSED' },
+      ...backToListening,
       { type: 'UTTERANCE_COMPLETED', requestId: 'r2' },
       { type: 'PROCESSING_SUCCEEDED', requestId: 'r2', turn: makeTurn({ id: 't2' }) },
-      { type: 'RESULT_DISPLAY_ELAPSED' },
+      ...backToListening,
     ]);
 
   it('enters browsing at the newest item and steps backwards', () => {
@@ -312,6 +328,22 @@ describe('history browsing', () => {
     expect(state.status).toBe('LISTENING_TO_THEM');
   });
 
+  it('browsing entered from SHOWING_THEM_RESULT returns to the still-displayed result', () => {
+    const showing = run([
+      { type: 'START_CONVERSATION' },
+      { type: 'UTTERANCE_COMPLETED', requestId: 'r1' },
+      { type: 'PROCESSING_SUCCEEDED', requestId: 'r1', turn: makeTurn() },
+    ]);
+    const browsing = reduce(showing, { type: 'HISTORY_PREVIOUS' }).state;
+    expect(browsing.status).toBe('BROWSING_HISTORY');
+    expect(browsing.browsingReturnStatus).toBe('SHOWING_THEM_RESULT');
+
+    const back = reduce(browsing, { type: 'TOGGLE_DIRECTION' });
+    expect(back.state.status).toBe('SHOWING_THEM_RESULT');
+    // The mic must stay closed while a completed result is displayed.
+    expect(back.effects).not.toContainEqual({ type: 'SET_MIC', open: true });
+  });
+
   it('R1 while browsing returns to the state browsing started from', () => {
     // Enter browsing from READ_ALOUD_PAUSED: R1 must return there, keeping
     // the mic off so the user can still read the sentence aloud.
@@ -341,7 +373,7 @@ describe('history browsing', () => {
       { type: 'START_CONVERSATION' },
       { type: 'UTTERANCE_COMPLETED', requestId: 'r1' },
       { type: 'PROCESSING_SUCCEEDED', requestId: 'r1', turn: makeTurn() },
-      { type: 'RESULT_DISPLAY_ELAPSED' },
+      ...backToListening,
       { type: 'HISTORY_PREVIOUS' },
     ]);
     expect(browsing.status).toBe('BROWSING_HISTORY');
@@ -364,7 +396,7 @@ describe('history browsing', () => {
         [
           { type: 'UTTERANCE_COMPLETED', requestId: `r${i}` },
           { type: 'PROCESSING_SUCCEEDED', requestId: `r${i}`, turn: makeTurn({ id: `t${i}` }) },
-          { type: 'RESULT_DISPLAY_ELAPSED' },
+          ...backToListening,
         ],
         state,
       );
@@ -626,109 +658,86 @@ describe('two-stage processing phases and transient transcript', () => {
   });
 });
 
-describe('live partial previews', () => {
-  const speaking = () => run([{ type: 'START_CONVERSATION' }, { type: 'SPEECH_STARTED' }]);
-
-  it('stores partial previews and clears an outdated translation when the transcript changes', () => {
-    let state = speaking();
-
-    // First partial transcript arrives.
-    state = reduce(state, {
-      type: 'PARTIAL_TRANSCRIPT',
-      transcript: 'Dónde está',
-    }).state;
-
-    expect(state.partialTranscript).toBe('Dónde está');
-    expect(state.partialTranslation).toBeNull();
-
-    // Translation corresponding to the first transcript arrives.
-    state = reduce(state, {
-      type: 'PARTIAL_TRANSLATION',
-      translation: 'Where is',
-    }).state;
-
-    expect(state.partialTranscript).toBe('Dónde está');
-    expect(state.partialTranslation).toBe('Where is');
-
-    // Whisper produces a newer, longer transcript. The previous translation
-    // belongs to the older transcript and must therefore be removed.
-    state = reduce(state, {
-      type: 'PARTIAL_TRANSCRIPT',
-      transcript: 'Dónde está la estación',
-    }).state;
-
-    expect(state.partialTranscript).toBe('Dónde está la estación');
-    expect(state.partialTranslation).toBeNull();
-
-    // The fresh translation corresponding to the newer transcript arrives.
-    state = reduce(state, {
-      type: 'PARTIAL_TRANSLATION',
-      translation: 'Where is the station',
-    }).state;
-
-    expect(state.partialTranscript).toBe('Dónde está la estación');
-    expect(state.partialTranslation).toBe('Where is the station');
+describe('final-only pipeline invariants', () => {
+  it('the machine state carries no partial-preview fields', () => {
+    const state = run([{ type: 'START_CONVERSATION' }, { type: 'SPEECH_STARTED' }]);
+    expect('partialTranscript' in state).toBe(false);
+    expect('partialTranslation' in state).toBe(false);
   });
 
-  it('ignores partials when nobody is speaking', () => {
+  it('speaking produces no effects — no request may start before the utterance completes', () => {
     const listening = run([{ type: 'START_CONVERSATION' }]);
-    const { state } = reduce(listening, { type: 'PARTIAL_TRANSCRIPT', transcript: 'ghost' });
-    expect(state.partialTranscript).toBeNull();
-
-    const noTranscript = reduce(speaking(), {
-      type: 'PARTIAL_TRANSLATION',
-      translation: 'orphan',
-    });
-    expect(noTranscript.state.partialTranslation).toBeNull();
+    const speaking = reduce(listening, { type: 'SPEECH_STARTED' });
+    expect(speaking.effects).toEqual([]);
+    expect(speaking.state.speechActive).toBe(true);
   });
 
-  it('keeps the last partial through UTTERANCE_COMPLETED for the transcribing screen', () => {
-    let state = speaking();
-    state = reduce(state, { type: 'PARTIAL_TRANSCRIPT', transcript: 'Dónde está' }).state;
-    state = reduce(state, { type: 'UTTERANCE_COMPLETED', requestId: 'r1' }).state;
-    expect(state.status).toBe('PROCESSING_THEM');
-    expect(state.partialTranscript).toBe('Dónde está');
+  it('the outgoing result remains indefinitely — only R1 leaves it, into LISTENING_TO_THEM', () => {
+    const paused = run([
+      { type: 'START_CONVERSATION' },
+      { type: 'TOGGLE_DIRECTION' },
+      { type: 'UTTERANCE_COMPLETED', requestId: 'r1' },
+      {
+        type: 'PROCESSING_SUCCEEDED',
+        requestId: 'r1',
+        turn: makeTurn({ direction: 'me-to-them' }),
+      },
+    ]);
+    expect(paused.status).toBe('READ_ALOUD_PAUSED');
+
+    // Unrelated events are absorbed; the mic never reopens by itself.
+    const ignored = reduce(paused, { type: 'SPEECH_STARTED' });
+    expect(ignored.state.status).toBe('READ_ALOUD_PAUSED');
+    expect(ignored.effects).toEqual([]);
+
+    const { state, effects } = reduce(paused, { type: 'TOGGLE_DIRECTION' });
+    expect(state.status).toBe('LISTENING_TO_THEM');
+    expect(state.direction).toBe('them-to-me');
+    expect(effects).toContainEqual({ type: 'SET_MIC', open: true });
   });
 
-  it('replaces the partial with the authoritative final transcript', () => {
-    let state = speaking();
-    state = reduce(state, { type: 'PARTIAL_TRANSCRIPT', transcript: 'Dónde está' }).state;
-    state = reduce(state, { type: 'UTTERANCE_COMPLETED', requestId: 'r1' }).state;
-    state = reduce(state, {
-      type: 'TRANSCRIPTION_SUCCEEDED',
-      requestId: 'r1',
-      transcript: '¿Dónde está la estación?',
-    }).state;
-    expect(state.partialTranscript).toBeNull();
-    expect(state.partialTranslation).toBeNull();
-    expect(state.currentTranscript).toBe('¿Dónde está la estación?');
-  });
-
-  it('clears partials on a new utterance, toggle, offline and completion', () => {
-    const withPartial = () => {
-      let state = speaking();
-      state = reduce(state, { type: 'PARTIAL_TRANSCRIPT', transcript: 'so far' }).state;
-      return state;
+  it('the mic is open only in the two LISTENING states', () => {
+    const micShouldBeOpen: Record<string, boolean> = {
+      SETUP: false,
+      LISTENING_TO_THEM: true,
+      PROCESSING_THEM: false,
+      SHOWING_THEM_RESULT: false,
+      LISTENING_TO_ME: true,
+      PROCESSING_ME: false,
+      READ_ALOUD_PAUSED: false,
+      BROWSING_HISTORY: false,
+      OFFLINE: false,
+      ERROR: false,
+      EXITING: false,
+    };
+    // Walk a path visiting every state and track SET_MIC effects.
+    let micOpen = false;
+    let state = initialMachineState(true);
+    const step = (event: ConversationEvent) => {
+      const result = reduce(state, event);
+      state = result.state;
+      for (const effect of result.effects) {
+        if (effect.type === 'SET_MIC') micOpen = effect.open;
+      }
+      expect(micOpen).toBe(micShouldBeOpen[state.status]);
     };
 
-    expect(reduce(withPartial(), { type: 'SPEECH_STARTED' }).state.partialTranscript).toBeNull();
-    expect(reduce(withPartial(), { type: 'TOGGLE_DIRECTION' }).state.partialTranscript).toBeNull();
-    expect(reduce(withPartial(), { type: 'NETWORK_OFFLINE' }).state.partialTranscript).toBeNull();
-    expect(reduce(withPartial(), { type: 'END_CONVERSATION' }).state.partialTranscript).toBeNull();
-
-    let state = reduce(withPartial(), { type: 'UTTERANCE_COMPLETED', requestId: 'r1' }).state;
-    state = reduce(state, {
-      type: 'TRANSCRIPTION_SUCCEEDED',
-      requestId: 'r1',
-      transcript: 'x',
-    }).state;
-    state = reduce(state, {
+    step({ type: 'START_CONVERSATION' }); // LISTENING_TO_THEM
+    step({ type: 'SPEECH_STARTED' });
+    step({ type: 'UTTERANCE_COMPLETED', requestId: 'r1' }); // PROCESSING_THEM
+    step({ type: 'PROCESSING_SUCCEEDED', requestId: 'r1', turn: makeTurn() }); // SHOWING_THEM_RESULT
+    step({ type: 'HISTORY_PREVIOUS' }); // BROWSING_HISTORY
+    step({ type: 'TOGGLE_DIRECTION' }); // back to SHOWING_THEM_RESULT
+    step({ type: 'TOGGLE_DIRECTION' }); // LISTENING_TO_ME
+    step({ type: 'UTTERANCE_COMPLETED', requestId: 'r2' }); // PROCESSING_ME
+    step({
       type: 'PROCESSING_SUCCEEDED',
-      requestId: 'r1',
-      turn: makeTurn(),
-    }).state;
-    expect(state.partialTranscript).toBeNull();
-    expect(state.partialTranslation).toBeNull();
+      requestId: 'r2',
+      turn: makeTurn({ direction: 'me-to-them' }),
+    }); // READ_ALOUD_PAUSED
+    step({ type: 'NETWORK_OFFLINE' }); // OFFLINE
+    step({ type: 'NETWORK_ONLINE' }); // LISTENING_TO_ME (conversation active)
+    step({ type: 'EXIT' }); // EXITING
   });
 });
 

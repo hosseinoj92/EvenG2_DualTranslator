@@ -1,11 +1,18 @@
 /**
  * Serialized, debounced writer for glasses display updates.
  *
+ * The queue operates on whole display models — header, body and footer as one
+ * logical unit — never on independently mixed containers from different
+ * application states.
+ *
  * Guarantees:
  *   - Only one bridge write is in flight at any time (BLE cannot interleave).
- *   - Rapid successive updates are coalesced: only the latest pending payload
- *     per container is written after the debounce window.
- *   - Identical content is never re-sent.
+ *   - Rapid successive models are coalesced: only the newest pending model is
+ *     written after the debounce window; obsolete pending models are dropped.
+ *   - Once a newer model is enqueued, no further container writes from an
+ *     older model are issued, so an old Listening/Processing/Translating
+ *     screen can never overwrite a completed final result.
+ *   - Content identical to what a container already shows is never re-sent.
  */
 
 export interface RenderTarget {
@@ -13,8 +20,12 @@ export interface RenderTarget {
   write(containerId: number, content: string): Promise<void>;
 }
 
+/** One complete display model: content per container ID. */
+export type RenderModel = ReadonlyMap<number, string>;
+
 export class RenderQueue {
-  private readonly pending = new Map<number, string>();
+  /** The single newest model waiting to be written; older ones are discarded. */
+  private pending: RenderModel | null = null;
   private readonly lastWritten = new Map<number, string>();
   private timer: ReturnType<typeof setTimeout> | null = null;
   private flushing: Promise<void> = Promise.resolve();
@@ -26,10 +37,13 @@ export class RenderQueue {
     private readonly onError?: (error: unknown) => void,
   ) {}
 
-  /** Queues content for a container; actual write happens after the debounce. */
-  enqueue(containerId: number, content: string): void {
+  /**
+   * Queues one complete display model. A model enqueued later always
+   * supersedes any model still waiting to be written.
+   */
+  enqueue(model: RenderModel): void {
     if (this.disposed) return;
-    this.pending.set(containerId, content);
+    this.pending = model;
     if (this.timer === null) {
       this.timer = setTimeout(() => {
         this.timer = null;
@@ -38,13 +52,20 @@ export class RenderQueue {
     }
   }
 
-  /** Serialized flush of all pending container writes. */
+  /** Serialized flush of the newest pending model. */
   private flush(): void {
     this.flushing = this.flushing.then(async () => {
-      const batch = [...this.pending.entries()];
-      this.pending.clear();
-      for (const [containerId, content] of batch) {
+      // Taken at flush time, so everything enqueued while an earlier flush
+      // was writing collapses into the single newest model.
+      const model = this.pending;
+      this.pending = null;
+      if (model === null) return;
+      for (const [containerId, content] of model) {
         if (this.disposed) return;
+        // A newer model arrived while this one was being written: abandon
+        // the rest. The newer model's own flush is chained behind this one
+        // and brings every container up to date.
+        if (this.pending !== null) return;
         if (this.lastWritten.get(containerId) === content) continue;
         try {
           await this.target.write(containerId, content);
@@ -73,6 +94,6 @@ export class RenderQueue {
       clearTimeout(this.timer);
       this.timer = null;
     }
-    this.pending.clear();
+    this.pending = null;
   }
 }

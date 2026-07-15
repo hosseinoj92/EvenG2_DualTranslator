@@ -4,10 +4,17 @@ import {
   BODY_BUDGETS,
   buildDisplayModel,
   composeHistoryBody,
-  composeIncomingBody,
   composeTranslationPendingBody,
+  composeTurnBody,
 } from '../src/even/displayModel';
 import type { ConversationTurn } from '../src/types';
+
+// The two reference sentences from the product specification.
+const GERMAN_SOURCE = 'ich habe gestern mit meinem Onkel über deine Klausur gesprochen!';
+const GERMAN_TRANSLATION = 'Yesterday I talked to my uncle about your exam!';
+const ENGLISH_SOURCE = 'Yeah, to be honest, I did a very bad job on the exam!';
+const ENGLISH_TRANSLATION =
+  'Ja, ehrlich gesagt habe ich bei der Klausur sehr schlecht abgeschnitten!';
 
 function makeTurn(overrides: Partial<ConversationTurn> = {}): ConversationTurn {
   return {
@@ -28,8 +35,6 @@ function makeInput(overrides: Partial<DisplayInput> = {}): DisplayInput {
     direction: 'them-to-me',
     processingPhase: 'idle',
     currentTranscript: null,
-    partialTranscript: null,
-    partialTranslation: null,
     settings: { myLanguage: 'en', otherLanguage: 'es' },
     latestTurn: null,
     browsingTurn: null,
@@ -96,22 +101,13 @@ describe('incoming (them-to-me) layouts', () => {
 });
 
 describe('outgoing (me-to-them) layouts', () => {
-  it('listening: YOUR TURN header names the user language dynamically', () => {
+  it('listening: YOUR TURN header with a static Listening… body', () => {
     const model = buildDisplayModel(
       makeInput({ status: 'LISTENING_TO_ME', direction: 'me-to-them' }),
     );
     expect(model.header).toBe('YOUR TURN');
-    expect(model.body).toBe('Speak English…');
+    expect(model.body).toBe('Listening…');
     expect(model.footer).toBe('R1: cancel');
-
-    const german = buildDisplayModel(
-      makeInput({
-        status: 'LISTENING_TO_ME',
-        direction: 'me-to-them',
-        settings: { myLanguage: 'de', otherLanguage: 'fr' },
-      }),
-    );
-    expect(german.body).toBe('Speak German…');
   });
 
   it('transcribing: YOU header with Processing speech…', () => {
@@ -140,7 +136,7 @@ describe('outgoing (me-to-them) layouts', () => {
     expect(model.body).toContain('Translating…');
   });
 
-  it('completed: translation dominates, original sentence is not repeated', () => {
+  it('completed: YOU SAID shows both the original sentence and the translation', () => {
     const turn = makeTurn({
       direction: 'me-to-them',
       sourceLanguage: 'en',
@@ -149,107 +145,75 @@ describe('outgoing (me-to-them) layouts', () => {
       translation: '¿Dónde está la estación?',
     });
     const model = buildDisplayModel(makeInput({ status: 'READ_ALOUD_PAUSED', latestTurn: turn }));
-    expect(model.header).toBe('SAY THIS IN SPANISH');
-    expect(model.body).toBe('¿Dónde está la estación?');
-    expect(model.body).not.toContain('Where is the station?');
+    expect(model.header).toBe('YOU SAID');
+    expect(model.body).toBe('Where is the station?\n\n→ ¿Dónde está la estación?');
     expect(model.footer).toBe('R1: listen to them');
-  });
-
-  it('SAY THIS IN … uses the language stored in the turn', () => {
-    const turn = makeTurn({
-      direction: 'me-to-them',
-      sourceLanguage: 'en',
-      targetLanguage: 'tr',
-      transcript: 'Good morning',
-      translation: 'Günaydın',
-    });
-    const model = buildDisplayModel(makeInput({ status: 'READ_ALOUD_PAUSED', latestTurn: turn }));
-    expect(model.header).toBe('SAY THIS IN TURKISH');
-    expect(model.body).toBe('Günaydın');
-  });
-
-  it('outgoing translation receives the dominant body budget', () => {
-    expect(BODY_BUDGETS.outgoingTranslation).toBeGreaterThan(BODY_BUDGETS.translation);
-    const long = 'palabra '.repeat(40).trim();
-    const turn = makeTurn({ direction: 'me-to-them', targetLanguage: 'es', translation: long });
-    const model = buildDisplayModel(makeInput({ status: 'READ_ALOUD_PAUSED', latestTurn: turn }));
-    expect(model.body.length).toBeGreaterThan(BODY_BUDGETS.translation);
   });
 });
 
-describe('live preview layouts', () => {
-  it('shows the partial transcript while they are still speaking', () => {
-    const model = buildDisplayModel(
-      makeInput({ status: 'LISTENING_TO_THEM', partialTranscript: 'Dónde está la' }),
-    );
-    expect(model.header).toBe('THEM');
-    expect(model.body).toBe('Dónde está la');
+describe('final-only pipeline screens (German ↔ English reference flow)', () => {
+  it('while they speak: only a static Listening… screen, never text', () => {
+    const model = buildDisplayModel(makeInput({ status: 'LISTENING_TO_THEM' }));
+    expect(model.body).toBe('Listening…');
     expect(model.footer).toBe('R1: your turn');
   });
 
-  it('never shows an unfinished partial translation while they are speaking', () => {
+  it('during their final transcription: only the stable processing screen', () => {
     const model = buildDisplayModel(
-      makeInput({
-        status: 'LISTENING_TO_THEM',
-        partialTranscript: 'Dónde está la estación',
-        partialTranslation: 'Where is the station',
-      }),
+      makeInput({ status: 'PROCESSING_THEM', processingPhase: 'transcribing' }),
     );
-
-    expect(model.header).toBe('THEM');
-    expect(model.body).toBe('Dónde está la estación');
-    expect(model.body).not.toContain('Where is the station');
-    expect(model.body).not.toContain('→');
-  });
-
-  it('shows only the outgoing partial transcript while the user is speaking', () => {
-    const model = buildDisplayModel(
-      makeInput({
-        status: 'LISTENING_TO_ME',
-        direction: 'me-to-them',
-        partialTranscript: 'Where is the',
-        partialTranslation: 'Dónde está',
-      }),
-    );
-
-    expect(model.header).toBe('YOUR TURN');
-    expect(model.body).toBe('Where is the');
-    expect(model.body).not.toContain('Dónde está');
-    expect(model.body).not.toContain('→');
-    expect(model.footer).toBe('R1: cancel');
-  });
-
-  it('keeps the last preview visible while the final transcription runs', () => {
-    const model = buildDisplayModel(
-      makeInput({
-        status: 'PROCESSING_THEM',
-        processingPhase: 'transcribing',
-        partialTranscript: 'Dónde está la estación',
-      }),
-    );
-    expect(model.header).toBe('THEM');
-    expect(model.body).toBe('Dónde está la estación\n\nProcessing speech…');
+    expect(model.body).toBe('Processing speech…');
     expect(model.footer).toBe('Please wait');
   });
 
-  it('the final transcript screen wins over any leftover preview', () => {
+  it('during their translation: the complete German transcript with Translating…', () => {
     const model = buildDisplayModel(
       makeInput({
         status: 'PROCESSING_THEM',
         processingPhase: 'translating',
-        currentTranscript: '¿Dónde está la estación?',
-        partialTranscript: 'stale preview',
+        currentTranscript: GERMAN_SOURCE,
       }),
     );
+    expect(model.body).toBe(`${GERMAN_SOURCE}\n\nTranslating…`);
+  });
+
+  it('their completed result: German source and English translation together', () => {
+    const turn = makeTurn({
+      sourceLanguage: 'de',
+      targetLanguage: 'en',
+      transcript: GERMAN_SOURCE,
+      translation: GERMAN_TRANSLATION,
+    });
+    const model = buildDisplayModel(makeInput({ status: 'SHOWING_THEM_RESULT', latestTurn: turn }));
     expect(model.header).toBe('THEY SAID');
-    expect(model.body).toContain('¿Dónde está la estación?');
-    expect(model.body).not.toContain('stale preview');
+    expect(model.body).toBe(`${GERMAN_SOURCE}\n\n→ ${GERMAN_TRANSLATION}`);
+    expect(model.footer).toBe('R1: your turn');
+  });
+
+  it('my completed result: English source and German translation together', () => {
+    const turn = makeTurn({
+      direction: 'me-to-them',
+      sourceLanguage: 'en',
+      targetLanguage: 'de',
+      transcript: ENGLISH_SOURCE,
+      translation: ENGLISH_TRANSLATION,
+    });
+    const model = buildDisplayModel(makeInput({ status: 'READ_ALOUD_PAUSED', latestTurn: turn }));
+    expect(model.header).toBe('YOU SAID');
+    expect(model.body).toBe(`${ENGLISH_SOURCE}\n\n→ ${ENGLISH_TRANSLATION}`);
+    expect(model.footer).toBe('R1: listen to them');
+  });
+
+  it('display input carries no partial-preview fields', () => {
+    const input = makeInput();
+    expect('partialTranscript' in input).toBe(false);
+    expect('partialTranslation' in input).toBe(false);
   });
 });
 
 describe('composed bodies', () => {
-  it('composeIncomingBody keeps both parts on separate lines', () => {
-    const body = composeIncomingBody({
+  it('composeTurnBody keeps both parts on separate lines', () => {
+    const body = composeTurnBody({
       transcript: '¿Dónde está la estación?',
       translation: 'Where is the station?',
     });
@@ -258,7 +222,7 @@ describe('composed bodies', () => {
 
   it('truncates source and translation independently — a long transcript never hides the translation', () => {
     const longSource = 'palabra '.repeat(60).trim();
-    const body = composeIncomingBody({
+    const body = composeTurnBody({
       transcript: longSource,
       translation: 'Where is the station?',
     });
@@ -271,14 +235,14 @@ describe('composed bodies', () => {
   it('gives the translation a larger budget than the source', () => {
     expect(BODY_BUDGETS.translation).toBeGreaterThan(BODY_BUDGETS.source);
     const longTranslation = 'word '.repeat(60).trim();
-    const body = composeIncomingBody({ transcript: 'hola', translation: longTranslation });
+    const body = composeTurnBody({ transcript: 'hola', translation: longTranslation });
     const translationPart = body.split('\n\n→ ')[1]!;
     expect(translationPart.length).toBeLessThanOrEqual(BODY_BUDGETS.translation);
     expect(translationPart.endsWith('…')).toBe(true);
   });
 
   it('preserves Unicode, accents and non-English punctuation', () => {
-    const body = composeIncomingBody({
+    const body = composeTurnBody({
       transcript: '¿Größe? Ça va! İstanbul’a mı?',
       translation: 'Ünïcode översätts — «правильно»',
     });
@@ -287,7 +251,7 @@ describe('composed bodies', () => {
   });
 
   it('strips HTML and Markdown from both parts', () => {
-    const body = composeIncomingBody({
+    const body = composeTurnBody({
       transcript: '<b>hola</b> **mundo**',
       translation: '[hello](http://x) <script>alert(1)</script> world',
     });

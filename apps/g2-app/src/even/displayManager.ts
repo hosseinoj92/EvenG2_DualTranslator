@@ -107,7 +107,11 @@ export class DisplayManager {
     }
   }
 
-  /** Queues a full display model; identical content is skipped downstream. */
+  /**
+   * Queues a full display model as one atomic unit. The queue keeps only the
+   * newest complete model, so containers from different app states are never
+   * mixed; unchanged content is skipped downstream.
+   */
   show(model: DisplayModel): void {
     const { containers, maxDisplayedChars, containerPaddingPx } = this.config.display;
     // toDisplayBlock keeps the intentional line breaks of composed bodies
@@ -118,9 +122,13 @@ export class DisplayManager {
         containers[key].width - 2 * containerPaddingPx,
         containers[key].height - 2 * containerPaddingPx,
       );
-    this.queue.enqueue(containers.header.id, fit('header', model.header));
-    this.queue.enqueue(containers.body.id, fit('body', model.body));
-    this.queue.enqueue(containers.footer.id, fit('footer', model.footer));
+    this.queue.enqueue(
+      new Map([
+        [containers.header.id, fit('header', model.header)],
+        [containers.body.id, fit('body', model.body)],
+        [containers.footer.id, fit('footer', model.footer)],
+      ]),
+    );
   }
 
   async settle(): Promise<void> {

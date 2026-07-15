@@ -66,8 +66,6 @@ async function start(): Promise<void> {
     direction: snapshot.direction,
     processingPhase: snapshot.processingPhase,
     currentTranscript: snapshot.currentTranscript,
-    partialTranscript: snapshot.partialTranscript,
-    partialTranslation: snapshot.partialTranslation,
     settings: snapshot.settings,
     latestTurn: snapshot.latestTurn,
     browsingTurn: snapshot.browsingTurn,

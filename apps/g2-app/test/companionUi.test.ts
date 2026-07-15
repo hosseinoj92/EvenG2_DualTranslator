@@ -35,8 +35,6 @@ function makeSnapshot(overrides: Partial<AppSnapshot> = {}): AppSnapshot {
     speechActive: false,
     processingPhase: 'idle',
     currentTranscript: null,
-    partialTranscript: null,
-    partialTranslation: null,
     history: [],
     historyIndex: null,
     latestTurn: null,
@@ -83,34 +81,36 @@ describe('two-stage result panel', () => {
     expect(translationEl().textContent).toBe('');
   });
 
-  it('shows only the partial transcript while the other person is speaking', () => {
+  it('shows only Listening… while the other person is speaking — no partial text', () => {
     ui.update(
       makeSnapshot({
         status: 'LISTENING_TO_THEM',
         direction: 'them-to-me',
         speechActive: true,
-        partialTranscript: 'Dónde está la estación',
-        partialTranslation: 'Where is the station',
       }),
     );
 
-    expect(sourceEl().textContent).toBe('Dónde está la estación');
+    expect(sourceEl().textContent).toBe('Listening…');
     expect(translationEl().textContent).toBe('');
   });
 
-  it('shows only the partial transcript while the user is speaking', () => {
+  it('shows only Listening… while the user is speaking — no partial text', () => {
     ui.update(
       makeSnapshot({
         status: 'LISTENING_TO_ME',
         direction: 'me-to-them',
         speechActive: true,
-        partialTranscript: 'Where is the station',
-        partialTranslation: 'Dónde está la estación',
       }),
     );
 
-    expect(sourceEl().textContent).toBe('Where is the station');
+    expect(sourceEl().textContent).toBe('Listening…');
     expect(translationEl().textContent).toBe('');
+  });
+
+  it('exposes no partial preview fields in the snapshot contract', () => {
+    const snapshot = makeSnapshot();
+    expect('partialTranscript' in snapshot).toBe(false);
+    expect('partialTranslation' in snapshot).toBe(false);
   });
 
   it('shows the transcript with Translating… before translation resolves', () => {

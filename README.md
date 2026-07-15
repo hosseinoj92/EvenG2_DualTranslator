@@ -20,13 +20,15 @@ audio (completed utterance)
 ```
 
 - The app **waits for the speaker to finish** (local VAD detects end of
-  speech); nothing is transcribed while someone is still talking.
-- **Only one transcription request** is made per spoken utterance — never
-  partial, periodic or streaming requests.
-- **Incoming** final screens show the recognized original speech _and_ its
+  speech); nothing is transcribed or translated while someone is still
+  talking — the glasses show only a static `Listening…` screen.
+- **Only one transcription request** and **one translation request** are made
+  per spoken utterance — never partial, periodic or streaming requests.
+- **Both** final screens show the recognized original speech _and_ its
   translation, so they can be compared.
-- **Outgoing** final screens prioritize the translated sentence the user
-  should read aloud; the original stays on the phone and in history.
+- A completed result **stays on the glasses indefinitely** — there is no
+  automatic timeout back to listening. Pressing R1 is the only normal way to
+  move on; it switches the speaking direction.
 - **History** shows both texts for every completed turn.
 
 Default pair: you speak **English**, the other person speaks **Spanish**.
@@ -55,12 +57,16 @@ turn.
 
 **Direction A — the other person speaks** (`LISTENING_TO_THEM`)
 
-1. The other person speaks; local VAD waits for the utterance to finish.
-2. The completed WAV is sent for transcription — one request, no streaming.
-3. As soon as the transcript is back it appears on the glasses and the phone,
-   with `Translating…` underneath.
-4. The translation completes the turn: original + translation stay on screen.
-5. The app automatically resumes listening to them.
+1. The other person speaks; the glasses show only `Listening…` while local
+   VAD waits for the utterance to finish.
+2. The completed WAV is sent for transcription — one request, no streaming —
+   behind a stable `Processing speech…` screen.
+3. As soon as the transcript is back it appears whole on the glasses and the
+   phone, with `Translating…` underneath, and exactly one translation request
+   starts.
+4. The translation completes the turn: original + translation stay on screen
+   **indefinitely** — there is no automatic return to listening.
+5. Pressing R1 switches to Direction B (your turn).
 
 ```text
 ┌ THEM            ┌ THEM               ┌ THEY SAID            ┌ THEY SAID
@@ -75,22 +81,23 @@ turn.
 
 **Direction B — you speak** (single click → `LISTENING_TO_ME`)
 
-1. You speak; capture stops at end-of-speech.
+1. You speak; the glasses show only `Listening…` and capture stops at
+   end-of-speech.
 2. Same two stages: transcription first (so you can spot a recognition error),
-   then translation.
-3. The final screen is dominated by the sentence you need to read aloud — the
-   header carries the instruction, the body holds only the translation. The
-   microphone is **fully paused** (`READ_ALOUD_PAUSED`) so the app never
-   re-processes you reading the translation aloud.
-4. The next click returns to Direction A.
+   then exactly one translation.
+3. The final screen shows both your original sentence and the translation to
+   read aloud, and remains **indefinitely**. The microphone is **fully
+   paused** (`READ_ALOUD_PAUSED`) so the app never re-processes you reading
+   the translation aloud.
+4. The next click (R1) returns to Direction A.
 
 ```text
-┌ YOUR TURN       ┌ YOU                ┌ YOU SAID             ┌ SAY THIS IN SPANISH
+┌ YOUR TURN       ┌ YOU                ┌ YOU SAID             ┌ YOU SAID
 │                 │                    │                      │
-│ Speak English…  │ Processing speech… │ Where is the         │ ¿Dónde está la
-│                 │                    │ station?             │ estación?
-│                 │                    │                      │
-│                 │                    │ Translating…         │
+│ Listening…      │ Processing speech… │ Where is the         │ Where is the station?
+│                 │                    │ station?             │
+│                 │                    │                      │ → ¿Dónde está la
+│                 │                    │ Translating…         │   estación?
 │                 │                    │                      │
 └ R1: cancel      └ Please wait        └                      └ R1: listen to them
 ```
@@ -147,6 +154,13 @@ transcription, then text translation using the returned transcript. The legacy
 single-call `/api/v1/interpret` route (transcribe + translate in one request)
 remains available for compatibility but is no longer used by the app.
 
+The glasses render queue treats header/body/footer as **one versioned display
+model**: writes are serialized (one BLE write in flight), rapid updates are
+coalesced to the newest complete model, unchanged containers are never
+re-sent, and once a newer screen is queued no write from an older screen can
+follow it — a stale "Processing" screen can never overwrite a completed
+translation.
+
 ## 4. Repository structure
 
 ```text
@@ -162,7 +176,7 @@ turntranslate-g2/
 │   │   ├── api/               # typed Worker client + error mapping
 │   │   ├── ui/                # companion phone UI (textContent only)
 │   │   └── utils/             # debounce, text hygiene, abortable fetch, …
-│   └── test/                  # 159 unit tests
+│   └── test/                  # 184 unit tests
 ├── workers/translator-api/    # Cloudflare Worker
 │   ├── wrangler.toml          # AI binding + CORS vars (no secrets)
 │   ├── src/
@@ -172,7 +186,7 @@ turntranslate-g2/
 │   │   ├── validation.ts      # multipart/JSON/WAV validation
 │   │   ├── routes/            # health, transcribe, interpret, translateText
 │   │   └── services/          # transcription/translation/language services
-│   └── test/                  # 52 unit tests (mocked services, no real AI)
+│   └── test/                  # 53 unit tests (mocked services, no real AI)
 ├── packages/shared/           # language registry + API contracts + guards
 └── (root)                     # workspaces, ESLint, Prettier, tsconfig base
 ```
@@ -382,7 +396,7 @@ npm run build:worker   # worker dry-run bundle only
 npm run typecheck      # tsc --noEmit in all workspaces
 npm run lint           # ESLint (flat config, type-aware rules off for speed)
 npm run format         # Prettier write
-npm run test           # all workspace test suites (232 tests)
+npm run test           # all workspace test suites (258 tests)
 npm run test:watch     # vitest watch for the g2 app
 npm run simulate       # Even Hub simulator against localhost:5173
 npm run pack:g2        # build + pack into apps/g2-app/turntranslate.ehpk

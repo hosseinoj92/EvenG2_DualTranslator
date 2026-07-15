@@ -3,7 +3,7 @@
  *
  * `conversationReducer(state, event)` returns the next state plus a list of
  * effects for the controller to execute (mic control, request start/cancel,
- * timers, shutdown). The reducer itself performs no I/O, generates no IDs and
+ * shutdown). The reducer itself performs no I/O, generates no IDs and
  * reads no clocks, which is what makes every transition unit-testable.
  *
  * Invariants encoded here:
@@ -16,7 +16,10 @@
  *     AbortController in the controller);
  *   - the transient transcript survives from transcription success through
  *     translation success or failure, and is cleared on every path that
- *     abandons the utterance (new utterance, toggle, end, offline, exit).
+ *     abandons the utterance (new utterance, toggle, end, offline, exit);
+ *   - a completed result (SHOWING_THEM_RESULT / READ_ALOUD_PAUSED) stays on
+ *     screen indefinitely — no timer-based transition exists; only an explicit
+ *     R1 toggle, history browsing, or a global event leaves those states.
  */
 
 import type { ConversationDirection } from '@turntranslate/shared';
@@ -69,12 +72,9 @@ export type ConversationEvent =
       direction: ConversationDirection;
       text: string;
     }
-  | { type: 'PARTIAL_TRANSCRIPT'; transcript: string }
-  | { type: 'PARTIAL_TRANSLATION'; translation: string }
   | { type: 'TRANSCRIPTION_SUCCEEDED'; requestId: string; transcript: string }
   | { type: 'PROCESSING_SUCCEEDED'; requestId: string; turn: ConversationTurn }
   | { type: 'PROCESSING_FAILED'; requestId: string; error: MachineErrorInfo }
-  | { type: 'RESULT_DISPLAY_ELAPSED' }
   | { type: 'RETRY'; requestId: string }
   | { type: 'HISTORY_PREVIOUS' }
   | { type: 'HISTORY_NEXT' }
@@ -90,8 +90,6 @@ export type ConversationEffect =
   | { type: 'RETRY_LAST_UTTERANCE'; requestId: string }
   | { type: 'RETRY_TRANSLATION'; requestId: string }
   | { type: 'CANCEL_ACTIVE_REQUEST' }
-  | { type: 'SCHEDULE_RESUME' }
-  | { type: 'CANCEL_RESUME' }
   | { type: 'SHUTDOWN' };
 
 export interface MachineState {
@@ -109,14 +107,6 @@ export interface MachineState {
    * completes or the utterance is abandoned.
    */
   currentTranscript: string | null;
-  /**
-   * Live preview of the utterance still being spoken: what has been said so
-   * far, transcribed (and translated) every preview interval. Best-effort —
-   * replaced by the authoritative final transcript when the utterance
-   * completes, and cleared on every path that abandons the utterance.
-   */
-  partialTranscript: string | null;
-  partialTranslation: string | null;
   history: ConversationTurn[];
   /** Index into history while BROWSING_HISTORY; null otherwise. */
   historyIndex: number | null;
@@ -144,8 +134,6 @@ export function initialMachineState(online: boolean): MachineState {
     activeRequestId: null,
     processingPhase: 'idle',
     currentTranscript: null,
-    partialTranscript: null,
-    partialTranslation: null,
     history: [],
     historyIndex: null,
     browsingReturnStatus: null,
@@ -204,15 +192,12 @@ function reduce(
           activeRequestId: null,
           processingPhase: 'idle',
           currentTranscript: null,
-          partialTranscript: null,
-          partialTranslation: null,
           historyIndex: null,
           browsingReturnStatus: null,
           speechActive: false,
         },
         effects: [
           ...(state.activeRequestId ? cancelRequest() : []),
-          { type: 'CANCEL_RESUME' },
           { type: 'RESET_VAD' },
           // Unconditional hard-off: never leave the mic streaming into an
           // app that is going away, whatever state it was in.
@@ -230,15 +215,12 @@ function reduce(
           activeRequestId: null,
           processingPhase: 'idle',
           currentTranscript: null,
-          partialTranscript: null,
-          partialTranslation: null,
           historyIndex: null,
           browsingReturnStatus: null,
           speechActive: false,
         },
         effects: [
           ...(state.activeRequestId ? cancelRequest() : []),
-          { type: 'CANCEL_RESUME' },
           { type: 'RESET_VAD' },
           // No requests can be sent offline, so the mic must not keep running.
           { type: 'SET_MIC', open: false },
@@ -269,18 +251,12 @@ function reduce(
           activeRequestId: null,
           processingPhase: 'idle',
           currentTranscript: null,
-          partialTranscript: null,
-          partialTranslation: null,
           historyIndex: null,
           browsingReturnStatus: null,
           speechActive: false,
           lastError: null,
         },
-        effects: [
-          ...(state.activeRequestId ? cancelRequest() : []),
-          { type: 'CANCEL_RESUME' },
-          { type: 'RESET_VAD' },
-        ],
+        effects: [...(state.activeRequestId ? cancelRequest() : []), { type: 'RESET_VAD' }],
       };
 
     case 'MIC_FAILED':
@@ -293,18 +269,12 @@ function reduce(
           activeRequestId: null,
           processingPhase: 'idle',
           currentTranscript: null,
-          partialTranscript: null,
-          partialTranslation: null,
           historyIndex: null,
           browsingReturnStatus: null,
           speechActive: false,
           lastError: event.error,
         },
-        effects: [
-          ...(state.activeRequestId ? cancelRequest() : []),
-          { type: 'CANCEL_RESUME' },
-          { type: 'RESET_VAD' },
-        ],
+        effects: [...(state.activeRequestId ? cancelRequest() : []), { type: 'RESET_VAD' }],
       };
 
     case 'MANUAL_INPUT_SUBMITTED':
@@ -362,36 +332,9 @@ function reduceListening(state: MachineState, event: ConversationEvent): Transit
     case 'SPEECH_STARTED':
       // A new utterance begins: any leftover transient text is stale.
       return {
-        state: {
-          ...state,
-          speechActive: true,
-          currentTranscript: null,
-          partialTranscript: null,
-          partialTranslation: null,
-        },
+        state: { ...state, speechActive: true, currentTranscript: null },
         effects: [],
       };
-
-    case 'PARTIAL_TRANSCRIPT':
-      // Whisper can revise earlier words when more audio becomes available.
-      // Never show a translation produced for an older transcript underneath
-      // the new transcript.
-      if (!state.speechActive) return { state, effects: [] };
-
-      return {
-        state: {
-          ...state,
-          partialTranscript: event.transcript,
-          partialTranslation: null,
-        },
-        effects: [],
-      };
-
-    case 'PARTIAL_TRANSLATION':
-      if (!state.speechActive || state.partialTranscript === null) {
-        return { state, effects: [] };
-      }
-      return { state: { ...state, partialTranslation: event.translation }, effects: [] };
 
     case 'UTTERANCE_COMPLETED':
       return {
@@ -427,15 +370,13 @@ function reduceProcessing(
       if (event.requestId !== state.activeRequestId) {
         return { state, effects: [] }; // Stale transcript: ignore entirely.
       }
-      // The completed transcript becomes visible immediately (replacing any
-      // live preview); the controller continues with the translation request.
+      // The completed transcript becomes visible immediately; the controller
+      // continues with the translation request.
       return {
         state: {
           ...state,
           processingPhase: 'translating',
           currentTranscript: event.transcript,
-          partialTranscript: null,
-          partialTranslation: null,
         },
         effects: [],
       };
@@ -445,36 +386,20 @@ function reduceProcessing(
       if (event.requestId !== state.activeRequestId) {
         return { state, effects: [] }; // Stale response: ignore entirely.
       }
+      // Both completed-result states are terminal until an explicit user
+      // action: no timer resumes listening and the mic stays closed.
       const history = appendTurn(state.history, event.turn, config.maxHistoryItems);
-      if (state.status === 'PROCESSING_ME') {
-        return {
-          state: {
-            ...state,
-            status: 'READ_ALOUD_PAUSED',
-            history,
-            activeRequestId: null,
-            processingPhase: 'idle',
-            currentTranscript: null,
-            partialTranscript: null,
-            partialTranslation: null,
-            lastError: null,
-          },
-          effects: [],
-        };
-      }
       return {
         state: {
           ...state,
-          status: 'SHOWING_THEM_RESULT',
+          status: state.status === 'PROCESSING_ME' ? 'READ_ALOUD_PAUSED' : 'SHOWING_THEM_RESULT',
           history,
           activeRequestId: null,
           processingPhase: 'idle',
           currentTranscript: null,
-          partialTranscript: null,
-          partialTranslation: null,
           lastError: null,
         },
-        effects: [{ type: 'SCHEDULE_RESUME' }],
+        effects: [],
       };
     }
 
@@ -484,15 +409,13 @@ function reduceProcessing(
       }
       // currentTranscript is deliberately preserved: when translation failed
       // after a successful transcription, the error display shows what was
-      // recognized and a retry can reuse it. Live previews are dropped.
+      // recognized and a retry can reuse it.
       return {
         state: {
           ...state,
           status: 'ERROR',
           activeRequestId: null,
           processingPhase: 'idle',
-          partialTranscript: null,
-          partialTranslation: null,
           lastError: event.error,
         },
         effects: [],
@@ -510,30 +433,18 @@ function reduceProcessing(
   }
 }
 
+/**
+ * A completed incoming result stays on the glasses indefinitely. The only
+ * normal exit is R1 (toggle → LISTENING_TO_ME); browsing history is allowed
+ * and returns here.
+ */
 function reduceShowingResult(state: MachineState, event: ConversationEvent): TransitionResult {
   switch (event.type) {
-    case 'RESULT_DISPLAY_ELAPSED':
-      return {
-        state: {
-          ...state,
-          status: state.conversationActive ? 'LISTENING_TO_THEM' : 'SETUP',
-          direction: 'them-to-me',
-        },
-        effects: [{ type: 'RESET_VAD' }],
-      };
+    case 'TOGGLE_DIRECTION':
+      return toggleFromLive(state);
 
-    case 'TOGGLE_DIRECTION': {
-      const toggled = toggleFromLive(state);
-      return { state: toggled.state, effects: [{ type: 'CANCEL_RESUME' }, ...toggled.effects] };
-    }
-
-    case 'HISTORY_PREVIOUS': {
-      const browsing = enterBrowsing(state);
-      return {
-        state: browsing.state,
-        effects: [{ type: 'CANCEL_RESUME' }, ...browsing.effects],
-      };
-    }
+    case 'HISTORY_PREVIOUS':
+      return enterBrowsing(state);
 
     default:
       return { state, effects: [] };
@@ -672,15 +583,12 @@ function handleManualInput(
       // Manual input skips transcription: the typed text is the transcript.
       processingPhase: 'translating',
       currentTranscript: event.text,
-      partialTranscript: null,
-      partialTranslation: null,
       historyIndex: null,
       browsingReturnStatus: null,
       speechActive: false,
       lastError: null,
     },
     effects: [
-      { type: 'CANCEL_RESUME' },
       { type: 'RESET_VAD' },
       { type: 'BEGIN_REQUEST', requestId: event.requestId, kind: 'manual' },
     ],
@@ -698,8 +606,6 @@ function toggleFromLive(state: MachineState): TransitionResult {
       direction: next,
       processingPhase: 'idle',
       currentTranscript: null,
-      partialTranscript: null,
-      partialTranslation: null,
       speechActive: false,
       lastError: null,
     },
@@ -712,25 +618,15 @@ function enterBrowsing(state: MachineState): TransitionResult {
   if (index === null) {
     return { state, effects: [] }; // Nothing to browse.
   }
-  // SHOWING_THEM_RESULT is timer-driven; its resume timer is cancelled when
-  // browsing starts, so returning there would strand the app. Normalize the
-  // return target to the state the timer would have produced.
-  const returnStatus: ConversationStatus =
-    state.status === 'SHOWING_THEM_RESULT'
-      ? state.conversationActive
-        ? 'LISTENING_TO_THEM'
-        : 'SETUP'
-      : state.status;
+  // Completed-result states are stable (no timers), so browsing can always
+  // return to exactly the state it started from.
   return {
     state: {
       ...state,
       status: 'BROWSING_HISTORY',
       historyIndex: index,
-      browsingReturnStatus: returnStatus,
+      browsingReturnStatus: state.status,
       speechActive: false,
-      // Any in-flight utterance preview dies with the VAD reset.
-      partialTranscript: null,
-      partialTranslation: null,
     },
     effects: [{ type: 'RESET_VAD' }],
   };
