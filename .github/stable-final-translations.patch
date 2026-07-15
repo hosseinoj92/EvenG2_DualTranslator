@@ -1,0 +1,411 @@
+diff --git a/apps/g2-app/src/config.ts b/apps/g2-app/src/config.ts
+index c47ab50..0000000 100644
+--- a/apps/g2-app/src/config.ts
++++ b/apps/g2-app/src/config.ts
+@@ -77,11 +77,12 @@ export const appConfig = {
+ 
+   /**
+-   * Live preview while someone is speaking: every `intervalMs` the audio
+-   * captured so far is transcribed and translated, so long sentences appear
+-   * incrementally instead of only after the speaker finishes. Previews are
+-   * best-effort — the final full-utterance transcription stays authoritative.
+-   * Each preview is a billed Workers AI call; set `enabled: false` to return
+-   * to strict one-request-per-utterance behaviour.
++   * Live transcript preview while someone is speaking: every `intervalMs` the
++   * audio captured so far is transcribed so long sentences appear incrementally.
++   * Translation is deliberately deferred until the completed utterance has
++   * received its authoritative final transcript. This prevents unstable partial
++   * translations from repeatedly redrawing on the glasses. Each preview is a
++   * billed speech-to-text call; set `enabled: false` to return to strict
++   * one-request-per-utterance behaviour.
+    */
+ livePreview: {
+   enabled: true as boolean,
+diff --git a/apps/g2-app/src/conversation/conversationController.ts b/apps/g2-app/src/conversation/conversationController.ts
+index 30df1ea..0000000 100644
+--- a/apps/g2-app/src/conversation/conversationController.ts
++++ b/apps/g2-app/src/conversation/conversationController.ts
+@@ -14,8 +14,10 @@
+  * stale responses are dropped by the reducer's requestId check.
+  *
+  * While the speaker is still talking, an optional live-preview loop
+- * (config.livePreview) additionally transcribes and translates the
+- * audio-so-far every interval so long sentences appear incrementally. At most
+- * one preview is in flight at a time, previews never touch the final chain or
+- * the error state, and the final full-utterance pass always wins.
++ * (config.livePreview) transcribes the audio-so-far every interval so long
++ * sentences appear incrementally. It deliberately does not translate partial
++ * transcripts: translated text is published only by the authoritative final
++ * chain after speech has ended. At most one preview is in flight at a time,
++ * previews never touch the final chain or the error state, and the final
++ * full-utterance pass always wins.
+  */
+@@ -400,7 +401,7 @@ export class ConversationController {
+   }
+ 
+   /**
+-   * Transcribe and translate one cumulative audio snapshot.
++   * Transcribe one cumulative audio snapshot for source-text preview only.
+    *
+    * Only the active preview operation may update preview ownership. Results
+    * from an aborted or superseded operation are ignored.
+@@ -424,7 +425,7 @@ export class ConversationController {
+ 
+     const generation = this.utteranceGeneration;
+     const direction = this.state.direction;
+-    const { sourceLanguage, targetLanguage } = this.languagesFor(direction);
++    const { sourceLanguage } = this.languagesFor(direction);
+     const controller = new AbortController();
+     const wav = encodeWav(pcm, this.deps.config.audio);
+ 
+@@ -450,39 +451,14 @@ export class ConversationController {
+         const transcript = transcription.transcript.trim();
+         if (transcript.length === 0) return;
+ 
+-        /*
+-         * Do not leave an older translation under a newer transcript. For an
+-         * existing preview, replace the translation with a temporary status
+-         * before publishing the updated transcript.
+-         */
+-        if (this.state.partialTranscript !== null) {
+-          this.dispatch({
+-            type: 'PARTIAL_TRANSLATION',
+-            translation: 'Translating…',
+-          });
+-        }
+-
++        // Preview only the recognized source text. Partial translations are
++        // intentionally never requested or published because machine
++        // translation can revise the whole sentence as more speech arrives.
+         this.dispatch({
+           type: 'PARTIAL_TRANSCRIPT',
+           transcript,
+         });
+-
+-        const response = await this.deps.client.translateText({
+-          text: transcript,
+-          sourceLanguage,
+-          targetLanguage,
+-          direction,
+-          requestId: makeId(),
+-          signal: controller.signal,
+-        });
+-
+-        if (!operationIsCurrent()) return;
+-
+-        this.dispatch({
+-          type: 'PARTIAL_TRANSLATION',
+-          translation: response.translation,
+-        });
+       } catch {
+-        // Preview failures are intentionally nonfatal. The final full-utterance
+-        // chain remains authoritative and has its own error handling.
++        // Preview transcription failures are intentionally nonfatal. The final
++        // full-utterance chain remains authoritative and has its own handling.
+       } finally {
+diff --git a/apps/g2-app/src/even/displayModel.ts b/apps/g2-app/src/even/displayModel.ts
+index e15d0c2..0000000 100644
+--- a/apps/g2-app/src/even/displayModel.ts
++++ b/apps/g2-app/src/even/displayModel.ts
+@@ -31,5 +31,8 @@ export interface DisplayInput {
+   currentTranscript: string | null;
+   /** Live preview of the sentence still being spoken. */
+   partialTranscript: string | null;
+-  /** Live preview translation of `partialTranscript`. */
++  /**
++   * Retained in the snapshot contract for compatibility, but deliberately not
++   * rendered on the glasses. Actual translations appear only after completion.
++   */
+   partialTranslation: string | null;
+@@ -74,16 +77,10 @@ export function composeTranslationPendingBody(transcript: string): string {
+ }
+ 
+ /**
+- * Live preview while the speaker is still talking: what has been said so far,
+- * plus its translation once the first preview pass returns one.
++ * Live preview while the speaker is still talking. Only the recognized source
++ * text is shown; partial translations are intentionally suppressed because they
++ * can change substantially as the sentence grows.
+  */
+-export function composeLivePartialBody(parts: {
+-  transcript: string;
+-  translation: string | null;
+-}): string {
+-  const source = toDisplayText(parts.transcript, BODY_BUDGETS.source);
+-  if (parts.translation === null) {
+-    return source;
+-  }
+-  return `${source}\n\n→ ${toDisplayText(parts.translation, BODY_BUDGETS.translation)}`;
++export function composeLivePartialBody(transcript: string): string {
++  return toDisplayText(transcript, BODY_BUDGETS.pendingTranscript);
+ }
+@@ -109,14 +104,11 @@ export function buildDisplayModel(input: DisplayInput): DisplayModel {
+ 
+     case 'LISTENING_TO_THEM':
+-      // While they are talking, the preview loop writes what has been said so
+-      // far (and its translation) every interval instead of a blank screen.
++      // While they are talking, show only the recognized source text so the
++      // display never flickers between unstable partial translations.
+       if (input.partialTranscript !== null) {
+         return {
+           header: 'THEM',
+-          body: composeLivePartialBody({
+-            transcript: input.partialTranscript,
+-            translation: input.partialTranslation,
+-          }),
++          body: composeLivePartialBody(input.partialTranscript),
+           footer: 'R1: your turn',
+         };
+       }
+@@ -158,11 +150,8 @@ export function buildDisplayModel(input: DisplayInput): DisplayModel {
+     case 'LISTENING_TO_ME':
+       if (input.partialTranscript !== null) {
+         return {
+           header: 'YOUR TURN',
+-          body: composeLivePartialBody({
+-            transcript: input.partialTranscript,
+-            translation: input.partialTranslation,
+-          }),
++          body: composeLivePartialBody(input.partialTranscript),
+           footer: 'R1: cancel',
+         };
+       }
+diff --git a/apps/g2-app/src/even/renderQueue.ts b/apps/g2-app/src/even/renderQueue.ts
+index a01d687..0000000 100644
+--- a/apps/g2-app/src/even/renderQueue.ts
++++ b/apps/g2-app/src/even/renderQueue.ts
+@@ -47,6 +47,13 @@ export class RenderQueue {
+       this.pending.clear();
+       for (const [containerId, content] of batch) {
+         if (this.disposed) return;
++
++        // A newer model may have arrived while an earlier BLE write was in
++        // flight. Do not write a now-stale container value and then immediately
++        // overwrite it; leave the newer value pending for the next flush.
++        const newerPending = this.pending.get(containerId);
++        if (newerPending !== undefined && newerPending !== content) continue;
++
+         if (this.lastWritten.get(containerId) === content) continue;
+         try {
+           await this.target.write(containerId, content);
+diff --git a/apps/g2-app/src/ui/companionUi.ts b/apps/g2-app/src/ui/companionUi.ts
+index 2320f94..0000000 100644
+--- a/apps/g2-app/src/ui/companionUi.ts
++++ b/apps/g2-app/src/ui/companionUi.ts
+@@ -183,21 +183,20 @@ export function mountCompanionUi(root: HTMLElement, callbacks: CompanionUiCallb
+    * All conversation text is rendered via textContent — never innerHTML.
+    */
+   function renderResult(snapshot: AppSnapshot): void {
+-    // Live preview while someone is still speaking: what has been said so
+-    // far, refreshed every preview interval, with its translation underneath.
++    // Live preview while someone is still speaking: show only the recognized
++    // source text. Translation is deferred until the final transcript is ready.
+     if (
+       snapshot.partialTranscript !== null &&
+       (snapshot.status === 'LISTENING_TO_THEM' || snapshot.status === 'LISTENING_TO_ME')
+     ) {
+       resultSpeaker.textContent = speakerLabel(snapshot.direction);
+       sourceText.textContent = snapshot.partialTranscript;
+-      translatedText.textContent = snapshot.partialTranslation ?? 'Translating…';
++      translatedText.textContent = '';
+       return;
+     }
+     if (snapshot.processingPhase === 'transcribing') {
+       resultSpeaker.textContent = speakerLabel(snapshot.direction);
+       sourceText.textContent = snapshot.partialTranscript ?? 'Processing speech…';
+-      translatedText.textContent =
+-        snapshot.partialTranscript !== null ? (snapshot.partialTranslation ?? '') : '';
++      translatedText.textContent = '';
+       return;
+     }
+diff --git a/apps/g2-app/test/companionUi.test.ts b/apps/g2-app/test/companionUi.test.ts
+index 30ae10f..0000000 100644
+--- a/apps/g2-app/test/companionUi.test.ts
++++ b/apps/g2-app/test/companionUi.test.ts
+@@ -78,6 +78,20 @@ const translationEl = () => root.querySelector('.tt-transcript .dst')!;
+ const speakerEl = () => root.querySelector('.tt-speaker')!;
+ 
+ describe('two-stage result panel', () => {
++  it('never shows a partial translation while the speaker is still talking', () => {
++    ui.update(
++      makeSnapshot({
++        status: 'LISTENING_TO_THEM',
++        speechActive: true,
++        partialTranscript: 'Dónde está la estación',
++        partialTranslation: 'Where is the',
++      }),
++    );
++
++    expect(sourceEl().textContent).toBe('Dónde está la estación');
++    expect(translationEl().textContent).toBe('');
++  });
++
+   it('shows Processing speech… while transcribing', () => {
+     ui.update(makeSnapshot({ status: 'PROCESSING_THEM', processingPhase: 'transcribing' }));
+     expect(sourceEl().textContent).toBe('Processing speech…');
+diff --git a/apps/g2-app/test/conversationController.test.ts b/apps/g2-app/test/conversationController.test.ts
+index d40c8b1..0000000 100644
+--- a/apps/g2-app/test/conversationController.test.ts
++++ b/apps/g2-app/test/conversationController.test.ts
+@@ -283,7 +283,7 @@ describe('live preview while speaking', () => {
+     for (let i = 0; i < frames; i += 1) controller.handleAudioFrame(pcmFrame(8000));
+   }
+ 
+-  it('transcribes and translates the audio-so-far every interval, then the final pass wins', async () => {
++  it('previews source transcription only, then publishes the final translation once', async () => {
+     vi.useFakeTimers();
+     const client = new MockClient();
+     const controller = makeController(client);
+@@ -298,10 +298,8 @@ describe('live preview while speaking', () => {
+     expect(controller.snapshot().partialTranscript).toBe('Dónde está la');
+     expect(controller.snapshot().status).toBe('LISTENING_TO_THEM'); // still live
+ 
+-    expect(client.translateCalls).toHaveLength(1); // preview translation
+-    client.resolveTranslation(0, 'Where is the');
+-    await vi.advanceTimersByTimeAsync(0);
+-    expect(controller.snapshot().partialTranslation).toBe('Where is the');
++    expect(client.translateCalls).toHaveLength(0);
++    expect(controller.snapshot().partialTranslation).toBeNull();
+ 
+     // Speaker finishes: previews stop, the authoritative final chain runs.
+     const silentFrames = Math.ceil(appConfig.vad.endSilenceMs / appConfig.vad.frameMs) + 2;
+@@ -313,10 +310,12 @@ describe('live preview while speaking', () => {
+     await vi.advanceTimersByTimeAsync(0);
+     expect(controller.snapshot().currentTranscript).toBe('¿Dónde está la estación?');
+     expect(controller.snapshot().partialTranscript).toBeNull(); // final replaced preview
++    expect(client.translateCalls).toHaveLength(1);
+ 
+-    client.resolveTranslation(1, 'Where is the station?');
++    client.resolveTranslation(0, 'Where is the station?');
+     await vi.advanceTimersByTimeAsync(0);
+     expect(controller.snapshot().latestTurn?.transcript).toBe('¿Dónde está la estación?');
++    expect(controller.snapshot().latestTurn?.translation).toBe('Where is the station?');
+     expect(controller.snapshot().history).toHaveLength(1); // previews never create turns
+     controller.dispose();
+   });
+@@ -347,11 +346,7 @@ describe('live preview while speaking', () => {
+     client.resolveTranscription(0, 'so far');
+     await vi.advanceTimersByTimeAsync(0);
+ 
+-    expect(client.translateCalls).toHaveLength(1);
+-
+-    client.resolveTranslation(0, 'hasta ahora');
+-    await vi.advanceTimersByTimeAsync(0);
+-
+     // The newest queued snapshot starts immediately. It does not wait for
+-    // another timer tick.
++    // a translation request or another timer tick.
++    expect(client.translateCalls).toHaveLength(0);
+     expect(client.transcribeCalls).toHaveLength(2);
+diff --git a/apps/g2-app/test/displayModel.test.ts b/apps/g2-app/test/displayModel.test.ts
+index f42c591..0000000 100644
+--- a/apps/g2-app/test/displayModel.test.ts
++++ b/apps/g2-app/test/displayModel.test.ts
+@@ -189,27 +189,29 @@ describe('live preview layouts', () => {
+     expect(model.footer).toBe('R1: your turn');
+   });
+ 
+-  it('adds the partial translation once it arrives', () => {
++  it('suppresses partial translations until the incoming turn is complete', () => {
+     const model = buildDisplayModel(
+       makeInput({
+         status: 'LISTENING_TO_THEM',
+         partialTranscript: 'Dónde está la estación',
+-        partialTranslation: 'Where is the station',
++        partialTranslation: 'Unstable partial translation',
+       }),
+     );
+-    expect(model.body).toBe('Dónde está la estación\n\n→ Where is the station');
++    expect(model.body).toBe('Dónde está la estación');
++    expect(model.body).not.toContain('Unstable partial translation');
+   });
+ 
+-  it('shows the live preview for the outgoing direction too', () => {
++  it('suppresses partial translations in the outgoing direction too', () => {
+     const model = buildDisplayModel(
+       makeInput({
+         status: 'LISTENING_TO_ME',
+         direction: 'me-to-them',
+         partialTranscript: 'Where is the',
+-        partialTranslation: 'Dónde está',
++        partialTranslation: 'Traducción parcial inestable',
+       }),
+     );
+     expect(model.header).toBe('YOUR TURN');
+-    expect(model.body).toBe('Where is the\n\n→ Dónde está');
++    expect(model.body).toBe('Where is the');
++    expect(model.body).not.toContain('Traducción parcial inestable');
+     expect(model.footer).toBe('R1: cancel');
+   });
+diff --git a/apps/g2-app/test/renderQueue.test.ts b/apps/g2-app/test/renderQueue.test.ts
+new file mode 100644
+index 0000000..0000000
+--- /dev/null
++++ b/apps/g2-app/test/renderQueue.test.ts
+@@ -0,0 +1,66 @@
++import { afterEach, describe, expect, it, vi } from 'vitest';
++import { RenderQueue } from '../src/even/renderQueue';
++
++interface Deferred {
++  promise: Promise<void>;
++  resolve: () => void;
++}
++
++function deferred(): Deferred {
++  let resolve!: () => void;
++  const promise = new Promise<void>((done) => {
++    resolve = done;
++  });
++  return { promise, resolve };
++}
++
++afterEach(() => {
++  vi.useRealTimers();
++});
++
++describe('RenderQueue', () => {
++  it('skips stale container writes when a newer display model is pending', async () => {
++    vi.useFakeTimers();
++
++    const firstWrite = deferred();
++    const writes: Array<[number, string]> = [];
++
++    const queue = new RenderQueue(
++      {
++        write: async (containerId, content) => {
++          writes.push([containerId, content]);
++          if (writes.length === 1) {
++            await firstWrite.promise;
++          }
++        },
++      },
++      10,
++    );
++
++    queue.enqueue(1, 'old header');
++    queue.enqueue(2, 'old partial translation');
++    queue.enqueue(3, 'old footer');
++
++    await vi.advanceTimersByTimeAsync(10);
++    expect(writes).toEqual([[1, 'old header']]);
++
++    // A completed final result arrives while the first old BLE write is still
++    // unresolved. The remaining old body/footer must never be sent.
++    queue.enqueue(1, 'final header');
++    queue.enqueue(2, 'final completed translation');
++    queue.enqueue(3, 'final footer');
++    await vi.advanceTimersByTimeAsync(10);
++
++    firstWrite.resolve();
++    await queue.settle();
++
++    expect(writes).toEqual([
++      [1, 'old header'],
++      [1, 'final header'],
++      [2, 'final completed translation'],
++      [3, 'final footer'],
++    ]);
++
++    queue.dispose();
++  });
++});
