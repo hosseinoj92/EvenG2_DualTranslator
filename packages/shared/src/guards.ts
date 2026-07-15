@@ -3,7 +3,12 @@
  * with these guards; the frontend validates responses before trusting them.
  */
 
-import type { ApiErrorResponse, InterpretSuccessResponse, TranslateTextRequest } from './api';
+import type {
+  ApiErrorResponse,
+  InterpretSuccessResponse,
+  TranscriptionSuccessResponse,
+  TranslateTextRequest,
+} from './api';
 import { isConversationDirection } from './api';
 import { isSupportedLanguageCode } from './languages';
 
@@ -27,6 +32,19 @@ export function isInterpretSuccessResponse(value: unknown): value is InterpretSu
     typeof value.processingTimeMs === 'number' &&
     Number.isFinite(value.processingTimeMs) &&
     isStringArray(value.warnings)
+  );
+}
+
+export function isTranscriptionSuccessResponse(
+  value: unknown,
+): value is TranscriptionSuccessResponse {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.requestId === 'string' &&
+    isSupportedLanguageCode(value.sourceLanguage) &&
+    typeof value.transcript === 'string' &&
+    typeof value.processingTimeMs === 'number' &&
+    Number.isFinite(value.processingTimeMs)
   );
 }
 

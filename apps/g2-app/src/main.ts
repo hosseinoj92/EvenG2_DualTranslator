@@ -13,7 +13,8 @@ import { MicrophoneController } from './audio/audioCapture';
 import { ConversationController } from './conversation/conversationController';
 import type { EvenBridge } from './even/bridge';
 import { BridgeUnavailableError, connectToBridge } from './even/bridge';
-import { DisplayManager, buildDisplayModel } from './even/displayManager';
+import { DisplayManager } from './even/displayManager';
+import { buildDisplayModel } from './even/displayModel';
 import { acceptAnyClickPolicy, subscribeToEvenHubEvents } from './even/eventRouter';
 import { mountCompanionUi } from './ui/companionUi';
 import {
@@ -63,6 +64,8 @@ async function start(): Promise<void> {
   const toDisplayInput = (snapshot: AppSnapshot) => ({
     status: snapshot.status,
     direction: snapshot.direction,
+    processingPhase: snapshot.processingPhase,
+    currentTranscript: snapshot.currentTranscript,
     settings: snapshot.settings,
     latestTurn: snapshot.latestTurn,
     browsingTurn: snapshot.browsingTurn,

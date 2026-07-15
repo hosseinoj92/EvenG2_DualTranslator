@@ -4,7 +4,7 @@
  */
 
 import type { ConversationDirection, LanguageCode } from '@turntranslate/shared';
-import type { ConversationStatus } from './conversation/conversationMachine';
+import type { ConversationStatus, ProcessingPhase } from './conversation/conversationMachine';
 
 /** One completed translation turn kept in local history. */
 export interface ConversationTurn {
@@ -49,6 +49,13 @@ export interface AppSnapshot {
   online: boolean;
   micOpen: boolean;
   speechActive: boolean;
+  /** Stage of the two-stage pipeline for the utterance being processed. */
+  processingPhase: ProcessingPhase;
+  /**
+   * Completed transcript of the utterance currently being processed
+   * (transcription finished, translation pending or failed); null otherwise.
+   */
+  currentTranscript: string | null;
   history: ConversationTurn[];
   historyIndex: number | null;
   latestTurn: ConversationTurn | null;

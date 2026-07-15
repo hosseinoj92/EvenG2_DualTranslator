@@ -138,6 +138,63 @@ describe('translationClient', () => {
     await expect(pending).rejects.toMatchObject({ code: 'CANCELLED' });
   });
 
+  it('posts transcribeFinal to /api/v1/transcribe and validates the payload', async () => {
+    const mock = stubFetch(
+      jsonResponse({
+        requestId: 'req-1',
+        sourceLanguage: 'es',
+        transcript: '¿Dónde está la estación?',
+        processingTimeMs: 300,
+      }),
+    );
+    const result = await client().transcribeFinal({
+      wav: params.wav,
+      sourceLanguage: 'es',
+      requestId: 'req-1',
+    });
+    expect(result.transcript).toBe('¿Dónde está la estación?');
+    const [url, init] = mock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://api.test/api/v1/transcribe');
+    expect(init.body).toBeInstanceOf(FormData);
+    const form = init.body as FormData;
+    expect(form.get('sourceLanguage')).toBe('es');
+    expect(form.get('requestId')).toBe('req-1');
+    expect(form.has('targetLanguage')).toBe(false);
+  });
+
+  it('rejects stale transcribeFinal responses', async () => {
+    stubFetch(
+      jsonResponse({
+        requestId: 'req-OTHER',
+        sourceLanguage: 'es',
+        transcript: 'hola',
+        processingTimeMs: 5,
+      }),
+    );
+    await expect(
+      client().transcribeFinal({ wav: params.wav, sourceLanguage: 'es', requestId: 'req-1' }),
+    ).rejects.toMatchObject({ code: 'STALE_RESPONSE' });
+  });
+
+  it('treats malformed transcribeFinal bodies as protocol errors', async () => {
+    stubFetch(jsonResponse({ requestId: 'req-1', transcript: 42 }));
+    await expect(
+      client().transcribeFinal({ wav: params.wav, sourceLanguage: 'es', requestId: 'req-1' }),
+    ).rejects.toMatchObject({ code: 'MALFORMED_RESPONSE' });
+  });
+
+  it('maps transcribeFinal backend errors to typed errors', async () => {
+    stubFetch(
+      jsonResponse(
+        { error: { code: 'NO_SPEECH_DETECTED', message: 'nothing heard', retryable: true } },
+        422,
+      ),
+    );
+    await expect(
+      client().transcribeFinal({ wav: params.wav, sourceLanguage: 'es', requestId: 'req-1' }),
+    ).rejects.toMatchObject({ code: 'NO_SPEECH_DETECTED', retryable: true });
+  });
+
   it('sends translate-text as JSON and validates the echo', async () => {
     stubFetch(jsonResponse({ ...successPayload('req-1'), direction: 'me-to-them' }));
     const result = await client().translateText({

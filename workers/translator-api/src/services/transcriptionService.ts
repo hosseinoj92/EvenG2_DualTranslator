@@ -26,14 +26,14 @@ export function createWorkersAiTranscriptionService(
       let raw: unknown;
       try {
         // whisper-large-v3-turbo takes base64 audio. `vad_filter` trims long
-        // silences upstream. The Workers AI input schema has no
-        // `condition_on_previous_text` field, so hallucination carry-over is
-        // instead avoided by sending each utterance as an independent request.
+        // silences upstream. Disabling `condition_on_previous_text` prevents
+        // unrelated text from previous decoding context influencing this utterance.
         raw = await ai.run(config.models.transcription, {
           audio: arrayBufferToBase64(audio),
           task: 'transcribe',
           language,
           vad_filter: true,
+          condition_on_previous_text: false,
         });
       } catch (error) {
         console.error('workers-ai transcription failed:', describeUpstreamError(error));

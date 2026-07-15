@@ -3,9 +3,31 @@
 A bidirectional conversation translator for **Even Realities G2** smart glasses.
 
 Two people speak different languages face to face. The G2 microphone captures
-each utterance, a Cloudflare Worker transcribes and translates it, and the
-translation appears as text on the glasses display. There is no text-to-speech:
-when your own sentence is translated, you read it aloud yourself.
+each utterance, a Cloudflare Worker transcribes it, the completed transcript
+appears immediately, then the translation follows on both the glasses and the
+phone. There is no text-to-speech: when your own sentence is translated, you
+read it aloud yourself.
+
+Processing is a **final-utterance two-stage pipeline** — this is _not_ live
+transcription:
+
+```text
+audio (completed utterance)
+  → final transcription (exactly one request per utterance)
+  → display the completed transcript ("Translating…")
+  → translation
+  → display the final direction-specific result
+```
+
+- The app **waits for the speaker to finish** (local VAD detects end of
+  speech); nothing is transcribed while someone is still talking.
+- **Only one transcription request** is made per spoken utterance — never
+  partial, periodic or streaming requests.
+- **Incoming** final screens show the recognized original speech _and_ its
+  translation, so they can be compared.
+- **Outgoing** final screens prioritize the translated sentence the user
+  should read aloud; the original stays on the phone and in history.
+- **History** shows both texts for every completed turn.
 
 Default pair: you speak **English**, the other person speaks **Spanish**.
 Both languages are selectable from the phone companion UI (English, Spanish,
@@ -25,29 +47,73 @@ German, French, Italian, Portuguese, Dutch, Turkish).
 
 ## 2. Conversation workflow
 
-The app is a strict state machine with two directions:
+The app is a strict state machine with two directions. The glasses display is
+speaker- and task-oriented: each screen answers one question (who is speaking?
+what did they say? what does it mean? what should I say aloud?). The language
+pair is chosen once during setup, so language codes are never repeated per
+turn.
 
-**Direction A — THEM · ES → EN** (`LISTENING_TO_THEM`)
+**Direction A — the other person speaks** (`LISTENING_TO_THEM`)
 
-1. The other person speaks Spanish.
-2. Local VAD isolates one utterance; only the finished utterance is uploaded.
-3. The Worker transcribes Spanish and translates to English.
-4. The English text appears on the glasses (`SHOWING_THEM_RESULT`).
+1. The other person speaks; local VAD waits for the utterance to finish.
+2. The completed WAV is sent for transcription — one request, no streaming.
+3. As soon as the transcript is back it appears on the glasses and the phone,
+   with `Translating…` underneath.
+4. The translation completes the turn: original + translation stay on screen.
 5. The app automatically resumes listening to them.
 
-**Direction B — YOU · EN → ES** (single click → `LISTENING_TO_ME`)
+```text
+┌ THEM            ┌ THEM               ┌ THEY SAID            ┌ THEY SAID
+│                 │                    │                      │
+│ Listening…      │ Processing speech… │ ¿Dónde está la       │ ¿Dónde está la
+│                 │                    │ estación?            │ estación?
+│                 │                    │                      │
+│                 │                    │ Translating…         │ → Where is the station?
+│                 │                    │                      │
+└ R1: your turn   └ Please wait        └                      └ R1: your turn
+```
 
-1. You speak English; capture stops at end-of-speech.
-2. The Worker transcribes English and translates to Spanish.
-3. The Spanish text is displayed prominently and the microphone is **fully
-   paused** (`READ_ALOUD_PAUSED`) so the app never re-processes you reading
-   the translation aloud.
-4. You read the Spanish sentence to the other person.
-5. The next click returns to Direction A.
+**Direction B — you speak** (single click → `LISTENING_TO_ME`)
+
+1. You speak; capture stops at end-of-speech.
+2. Same two stages: transcription first (so you can spot a recognition error),
+   then translation.
+3. The final screen is dominated by the sentence you need to read aloud — the
+   header carries the instruction, the body holds only the translation. The
+   microphone is **fully paused** (`READ_ALOUD_PAUSED`) so the app never
+   re-processes you reading the translation aloud.
+4. The next click returns to Direction A.
+
+```text
+┌ YOUR TURN       ┌ YOU                ┌ YOU SAID             ┌ SAY THIS IN SPANISH
+│                 │                    │                      │
+│ Speak English…  │ Processing speech… │ Where is the         │ ¿Dónde está la
+│                 │                    │ station?             │ estación?
+│                 │                    │                      │
+│                 │                    │ Translating…         │
+│                 │                    │                      │
+└ R1: cancel      └ Please wait        └                      └ R1: listen to them
+```
+
+History browsing (swipe up = older, swipe down = newer, swipe down at the
+newest returns to live) always shows both texts, labelled with the speaker and
+using the languages stored in each turn:
+
+```text
+┌ HISTORY · 3 / 8 · THEM        ┌ HISTORY · 4 / 8 · YOU
+│                               │
+│ ¿Dónde está la estación?      │ Where is the station?
+│                               │
+│ → Where is the station?       │ → ¿Dónde está la estación?
+│                               │
+└ Swipe: browse · R1: live      └ Swipe: browse · R1: live
+```
 
 Additional states: `SETUP`, `PROCESSING_THEM`, `PROCESSING_ME`,
 `BROWSING_HISTORY` (swipe through the last 20 turns), `OFFLINE`, `ERROR`
-(with retry), `EXITING`. The reducer is pure and exhaustively unit-tested
+(with retry — after a translation failure the recognized transcript is
+preserved and retry re-runs only the translation), `EXITING`. The reducer is
+pure and exhaustively unit-tested
 ([conversationMachine.ts](apps/g2-app/src/conversation/conversationMachine.ts)).
 
 ## 3. Architecture
@@ -64,14 +130,22 @@ Additional states: `SETUP`, `PROCESSING_THEM`, `PROCESSING_ME`,
 └───────────┬───────────────────────┼─────────────┬────────┘
    PCM s16le│ bridge events         │ HTTPS       │ textContainerUpgrade
             │                       ▼             ▼
-     ┌──────┴──────┐      ┌──────────────────┐  ┌─────────┐
-     │  G2 glasses │      │ Cloudflare Worker│  │ G2 576× │
-     │  microphone │      │ /api/v1/interpret│  │ 288 px  │
-     └─────────────┘      │ Workers AI:      │  │ display │
-                          │  whisper-v3-turbo│  └─────────┘
-                          │  m2m100-1.2b     │
-                          └──────────────────┘
+     ┌──────┴──────┐      ┌────────────────────┐  ┌─────────┐
+     │  G2 glasses │      │ Cloudflare Worker  │  │ G2 576× │
+     │  microphone │      │ 1. /api/v1/        │  │ 288 px  │
+     └─────────────┘      │    transcribe      │  │ display │
+                          │    (whisper-v3-    │  └─────────┘
+                          │     turbo)         │
+                          │ 2. /api/v1/        │
+                          │    translate-text  │
+                          │    (m2m100-1.2b)   │
+                          └────────────────────┘
 ```
+
+Each spoken utterance makes exactly two backend calls, in order: final
+transcription, then text translation using the returned transcript. The legacy
+single-call `/api/v1/interpret` route (transcribe + translate in one request)
+remains available for compatibility but is no longer used by the app.
 
 ## 4. Repository structure
 
@@ -88,7 +162,7 @@ turntranslate-g2/
 │   │   ├── api/               # typed Worker client + error mapping
 │   │   ├── ui/                # companion phone UI (textContent only)
 │   │   └── utils/             # debounce, text hygiene, abortable fetch, …
-│   └── test/                  # 84 unit tests
+│   └── test/                  # 159 unit tests
 ├── workers/translator-api/    # Cloudflare Worker
 │   ├── wrangler.toml          # AI binding + CORS vars (no secrets)
 │   ├── src/
@@ -96,9 +170,9 @@ turntranslate-g2/
 │   │   ├── env.ts             # bindings + the one backend config module
 │   │   ├── errors.ts          # ApiError → ApiErrorResponse mapping
 │   │   ├── validation.ts      # multipart/JSON/WAV validation
-│   │   ├── routes/            # health, interpret, translateText
+│   │   ├── routes/            # health, transcribe, interpret, translateText
 │   │   └── services/          # transcription/translation/language services
-│   └── test/                  # 34 unit tests (mocked services, no real AI)
+│   └── test/                  # 52 unit tests (mocked services, no real AI)
 ├── packages/shared/           # language registry + API contracts + guards
 └── (root)                     # workspaces, ESLint, Prettier, tsconfig base
 ```
@@ -236,11 +310,15 @@ in `app.json` first if `com.hosseinostovar.turntranslate` is taken
 ## 17. Cost control
 
 - Audio leaves the phone **only after** local VAD detects a complete utterance
-  — silence and background chatter are never uploaded.
+  — silence and background chatter are never uploaded, and exactly **one
+  transcription request** is made per utterance (no partial or periodic
+  transcription).
 - Utterances are capped at 12 s locally (`maximumUtteranceMs`) and 15 s
   server-side, bounding per-request Workers AI cost.
-- One backend request may exist at a time; toggling direction aborts the
-  in-flight request instead of stacking new ones.
+- One voice-processing chain may exist at a time; toggling direction aborts
+  whichever stage is in flight (transcription or translation) instead of
+  stacking new ones. If translation fails, retry reuses the saved transcript
+  rather than paying for a second transcription.
 - Whisper-large-v3-turbo and m2m100 are metered in Cloudflare "neurons"; both
   are among the cheapest models in the catalog and the free daily allocation
   covers typical development use. Watch usage in the Cloudflare dashboard
@@ -304,7 +382,7 @@ npm run build:worker   # worker dry-run bundle only
 npm run typecheck      # tsc --noEmit in all workspaces
 npm run lint           # ESLint (flat config, type-aware rules off for speed)
 npm run format         # Prettier write
-npm run test           # all workspace test suites (135 tests)
+npm run test           # all workspace test suites (232 tests)
 npm run test:watch     # vitest watch for the g2 app
 npm run simulate       # Even Hub simulator against localhost:5173
 npm run pack:g2        # build + pack into apps/g2-app/turntranslate.ehpk

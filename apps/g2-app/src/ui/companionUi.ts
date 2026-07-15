@@ -82,9 +82,10 @@ export function mountCompanionUi(root: HTMLElement, callbacks: CompanionUiCallba
   // ----- latest result panel -------------------------------------------------
   const resultPanel = el('section', 'tt-panel tt-transcript');
   resultPanel.append(heading('Latest translation'));
+  const resultSpeaker = el('div', 'tt-speaker');
   const sourceText = el('p', 'src');
   const translatedText = el('p', 'dst');
-  resultPanel.append(sourceText, translatedText);
+  resultPanel.append(resultSpeaker, sourceText, translatedText);
 
   // ----- manual input panel ---------------------------------------------------
   const manualPanel = el('section', 'tt-panel');
@@ -160,9 +161,7 @@ export function mountCompanionUi(root: HTMLElement, callbacks: CompanionUiCallba
     mySelect.select.value = snapshot.settings.myLanguage;
     otherSelect.select.value = snapshot.settings.otherLanguage;
 
-    const shown = snapshot.browsingTurn ?? snapshot.latestTurn;
-    sourceText.textContent = shown ? shown.transcript : '—';
-    translatedText.textContent = shown ? shown.translation : '—';
+    renderResult(snapshot);
 
     renderHistory(snapshot);
 
@@ -174,6 +173,38 @@ export function mountCompanionUi(root: HTMLElement, callbacks: CompanionUiCallba
     diagRows.latency.textContent =
       snapshot.lastLatencyMs === null ? '—' : `${snapshot.lastLatencyMs} ms`;
     diagRows.backend.textContent = `${snapshot.backendUrl} (${snapshot.online ? 'reachable?' : 'offline'})`;
+  }
+
+  /**
+   * The two-stage pipeline is mirrored here: while transcribing only a
+   * placeholder shows; as soon as the transcript is in it appears with
+   * "Translating…" underneath; the completed turn then shows both texts.
+   * All conversation text is rendered via textContent — never innerHTML.
+   */
+  function renderResult(snapshot: AppSnapshot): void {
+    if (snapshot.processingPhase === 'transcribing') {
+      resultSpeaker.textContent = speakerLabel(snapshot.direction);
+      sourceText.textContent = 'Processing speech…';
+      translatedText.textContent = '';
+      return;
+    }
+    if (snapshot.processingPhase === 'translating' && snapshot.currentTranscript !== null) {
+      resultSpeaker.textContent = speakerLabel(snapshot.direction);
+      sourceText.textContent = snapshot.currentTranscript;
+      translatedText.textContent = 'Translating…';
+      return;
+    }
+    // Translation failed but the transcript was preserved: keep it visible.
+    if (snapshot.error && snapshot.currentTranscript !== null) {
+      resultSpeaker.textContent = speakerLabel(snapshot.direction);
+      sourceText.textContent = snapshot.currentTranscript;
+      translatedText.textContent = 'Translation unavailable';
+      return;
+    }
+    const shown = snapshot.browsingTurn ?? snapshot.latestTurn;
+    resultSpeaker.textContent = shown ? speakerLabel(shown.direction) : '';
+    sourceText.textContent = shown ? shown.transcript : '—';
+    translatedText.textContent = shown ? shown.translation : '—';
   }
 
   function renderHistory(snapshot: AppSnapshot): void {
@@ -258,14 +289,19 @@ function diagRow(grid: HTMLElement, label: string): HTMLElement {
   return value;
 }
 
+function speakerLabel(direction: ConversationDirection): string {
+  return direction === 'them-to-me' ? 'THEM' : 'YOU';
+}
+
 function historyItem(turn: ConversationTurn, active: boolean): HTMLElement {
   const item = el('li');
   if (active) item.classList.add('active');
   const meta = el('div', 'meta');
+  // Languages come from the stored turn, never from the current settings —
+  // historical items stay correct after the pair is changed.
   const source = getLanguage(turn.sourceLanguage).shortLabel;
   const target = getLanguage(turn.targetLanguage).shortLabel;
-  const who = turn.direction === 'them-to-me' ? 'THEM' : 'YOU';
-  meta.textContent = `${who} · ${source} → ${target} · ${new Date(turn.timestamp).toLocaleTimeString()}`;
+  meta.textContent = `${speakerLabel(turn.direction)} · ${source} → ${target} · ${new Date(turn.timestamp).toLocaleTimeString()}`;
   const src = el('p', 'line src');
   src.textContent = turn.transcript;
   const dst = el('p', 'line dst');
@@ -293,7 +329,7 @@ function statusHint(snapshot: AppSnapshot): string {
       return snapshot.speechActive ? 'Hearing you…' : 'Speak now — your words will be translated.';
     case 'PROCESSING_THEM':
     case 'PROCESSING_ME':
-      return 'Translating…';
+      return snapshot.processingPhase === 'transcribing' ? 'Processing speech…' : 'Translating…';
     case 'SHOWING_THEM_RESULT':
       return 'Translation shown on the glasses.';
     case 'READ_ALOUD_PAUSED':

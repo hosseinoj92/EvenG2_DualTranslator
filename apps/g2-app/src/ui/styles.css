@@ -179,6 +179,14 @@ button.danger {
   border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
 }
 
+.tt-speaker {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  min-height: 1.2em;
+}
+
 .tt-transcript p {
   margin: 0;
   padding: 10px;

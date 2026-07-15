@@ -14,6 +14,7 @@ export { CONVERSATION_DIRECTIONS, API_PATHS, API_LIMITS, isConversationDirection
 export type {
   ConversationDirection,
   InterpretSuccessResponse,
+  TranscriptionSuccessResponse,
   ApiErrorCode,
   ApiErrorPayload,
   ApiErrorResponse,
@@ -21,4 +22,9 @@ export type {
   HealthResponse,
 } from './api';
 
-export { isInterpretSuccessResponse, isApiErrorResponse, isTranslateTextRequest } from './guards';
+export {
+  isInterpretSuccessResponse,
+  isTranscriptionSuccessResponse,
+  isApiErrorResponse,
+  isTranslateTextRequest,
+} from './guards';

@@ -3,20 +3,24 @@
  * executes the effects the reducer returns (mic, requests, timers, shutdown)
  * and publishes an AppSnapshot to subscribers (glasses display + phone UI)
  * after every transition.
+ *
+ * Spoken audio is processed in two explicit stages, one chain per utterance:
+ *   1. `transcribeFinal` — exactly one transcription request per completed
+ *      utterance (never partial, never periodic);
+ *   2. `translateText` — runs only after the transcript is back and visible.
+ * Both stages share one AbortController and one requestId, so a toggle,
+ * offline transition, exit or disposal cancels whichever stage is active and
+ * stale responses are dropped by the reducer's requestId check.
  */
 
-import type {
-  ConversationDirection,
-  InterpretSuccessResponse,
-  LanguageCode,
-} from '@turntranslate/shared';
+import type { ConversationDirection, LanguageCode } from '@turntranslate/shared';
 import type { AppConfig } from '../config';
 import type { TranslationClient } from '../api/translationClient';
 import { TranslationClientError } from '../api/apiErrors';
 import type { MicrophoneController } from '../audio/audioCapture';
 import { VoiceActivityDetector } from '../audio/voiceActivityDetector';
 import { encodeWav } from '../audio/wavEncoder';
-import type { AppSnapshot, ConversationTurn, LanguageSettings, VadDebugInfo } from '../types';
+import type { AppSnapshot, LanguageSettings, VadDebugInfo } from '../types';
 import { leadingDebounce, type LeadingDebounced } from '../utils/debounce';
 import { makeId } from '../utils/ids';
 import type { ConversationEffect, ConversationEvent, MachineState } from './conversationMachine';
@@ -36,6 +40,14 @@ export interface ControllerDeps {
 
 type SnapshotListener = (snapshot: AppSnapshot) => void;
 
+/** Everything needed to re-run translation without retranscribing the audio. */
+interface FailedTranslationContext {
+  transcript: string;
+  direction: ConversationDirection;
+  sourceLanguage: LanguageCode;
+  targetLanguage: LanguageCode;
+}
+
 export class ConversationController {
   private state: MachineState;
   private settings: LanguageSettings;
@@ -47,6 +59,7 @@ export class ConversationController {
   private resumeTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingUtterance: Uint8Array | null = null;
   private lastFailedUtterance: Uint8Array | null = null;
+  private lastFailedTranslation: FailedTranslationContext | null = null;
   private pendingManualText: string | null = null;
   private vadDebug: VadDebugInfo = { rms: 0, speaking: false, state: 'idle' };
   private lastLatencyMs: number | null = null;
@@ -95,6 +108,8 @@ export class ConversationController {
       online: this.state.online,
       micOpen: this.micOpen,
       speechActive: this.state.speechActive,
+      processingPhase: this.state.processingPhase,
+      currentTranscript: this.state.currentTranscript,
       history: [...this.state.history],
       historyIndex: this.state.historyIndex,
       latestTurn: latestTurn(this.state.history),
@@ -157,7 +172,12 @@ export class ConversationController {
     const trimmed = text.trim();
     if (trimmed.length === 0) return;
     this.pendingManualText = trimmed;
-    this.dispatch({ type: 'MANUAL_INPUT_SUBMITTED', requestId: makeId(), direction });
+    this.dispatch({
+      type: 'MANUAL_INPUT_SUBMITTED',
+      requestId: makeId(),
+      direction,
+      text: trimmed,
+    });
   }
 
   setNetworkOnline(online: boolean): void {
@@ -201,6 +221,7 @@ export class ConversationController {
     this.vad.reset();
     this.pendingUtterance = null;
     this.lastFailedUtterance = null;
+    this.lastFailedTranslation = null;
     this.pendingManualText = null;
     this.listeners.clear();
   }
@@ -241,6 +262,9 @@ export class ConversationController {
       case 'RETRY_LAST_UTTERANCE':
         this.beginUtteranceRequest(effect.requestId, this.lastFailedUtterance);
         break;
+      case 'RETRY_TRANSLATION':
+        this.beginTranslationRetry(effect.requestId);
+        break;
       case 'SCHEDULE_RESUME':
         this.clearResumeTimer();
         this.resumeTimer = setTimeout(() => {
@@ -262,6 +286,12 @@ export class ConversationController {
     this.dispatch({ type: 'UTTERANCE_COMPLETED', requestId: makeId() });
   }
 
+  /**
+   * The two-stage spoken-audio chain: encode the completed utterance as WAV,
+   * transcribe it exactly once, surface the transcript, then translate it.
+   * One AbortController covers both stages; the reducer's requestId check
+   * drops anything arriving after the chain was superseded or cancelled.
+   */
   private beginUtteranceRequest(requestId: string, pcm: Uint8Array | null): void {
     if (!pcm || pcm.length === 0) {
       this.dispatch({
@@ -272,40 +302,79 @@ export class ConversationController {
           message: 'Nothing to translate — try speaking again',
           retryable: false,
           canRetryUtterance: false,
+          canRetryTranslation: false,
         },
       });
       return;
     }
 
-    const { sourceLanguage, targetLanguage } = this.languagesFor(this.state.direction);
+    const direction = this.state.direction;
+    const { sourceLanguage, targetLanguage } = this.languagesFor(direction);
     const wav = encodeWav(pcm, this.deps.config.audio);
     const controller = new AbortController();
     this.abortController = controller;
     const startedAt = Date.now();
 
-    this.deps.client
-      .interpretUtterance({
-        wav,
-        sourceLanguage,
-        targetLanguage,
-        direction: this.state.direction,
-        requestId,
-        signal: controller.signal,
-      })
-      .then((response) => {
+    const chain = async (): Promise<void> => {
+      let transcript: string;
+      try {
+        const transcription = await this.deps.client.transcribeFinal({
+          wav,
+          sourceLanguage,
+          requestId,
+          signal: controller.signal,
+        });
+        transcript = transcription.transcript;
+      } catch (error) {
+        this.finishRequest(controller);
+        this.handleTranscriptionFailure(requestId, error, pcm);
+        return;
+      }
+
+      // The completed transcript is shown on phone + glasses immediately,
+      // before the translation request is even sent.
+      this.dispatch({ type: 'TRANSCRIPTION_SUCCEEDED', requestId, transcript });
+      if (controller.signal.aborted) return; // Chain was cancelled mid-dispatch.
+
+      try {
+        const response = await this.deps.client.translateText({
+          text: transcript,
+          sourceLanguage,
+          targetLanguage,
+          direction,
+          requestId,
+          signal: controller.signal,
+        });
         this.lastLatencyMs = Date.now() - startedAt;
         this.lastFailedUtterance = null;
+        this.lastFailedTranslation = null;
         this.finishRequest(controller);
         this.dispatch({
           type: 'PROCESSING_SUCCEEDED',
           requestId,
-          turn: turnFromResponse(response),
+          turn: {
+            id: requestId,
+            direction,
+            sourceLanguage,
+            targetLanguage,
+            // The final transcription result is authoritative — not the echo
+            // the translation endpoint returns.
+            transcript,
+            translation: response.translation,
+            timestamp: Date.now(),
+          },
         });
-      })
-      .catch((error: unknown) => {
+      } catch (error) {
         this.finishRequest(controller);
-        this.handleRequestFailure(requestId, error, pcm);
-      });
+        this.handleTranslationFailure(requestId, error, {
+          transcript,
+          direction,
+          sourceLanguage,
+          targetLanguage,
+        });
+      }
+    };
+    void chain();
   }
 
   private beginManualRequest(requestId: string): void {
@@ -313,39 +382,85 @@ export class ConversationController {
     this.pendingManualText = null;
     if (!text) return;
 
-    const { sourceLanguage, targetLanguage } = this.languagesFor(this.state.direction);
+    const direction = this.state.direction;
+    const { sourceLanguage, targetLanguage } = this.languagesFor(direction);
+    this.runTranslationStage(requestId, {
+      transcript: text,
+      direction,
+      sourceLanguage,
+      targetLanguage,
+    });
+  }
+
+  /** RETRY_TRANSLATION effect: reuse the preserved transcript, no re-transcription. */
+  private beginTranslationRetry(requestId: string): void {
+    const context = this.lastFailedTranslation;
+    if (!context) {
+      this.dispatch({
+        type: 'PROCESSING_FAILED',
+        requestId,
+        error: {
+          code: 'TRANSLATION_FAILED',
+          message: 'Translation unavailable',
+          retryable: false,
+          canRetryUtterance: false,
+          canRetryTranslation: false,
+        },
+      });
+      return;
+    }
+    this.runTranslationStage(requestId, context);
+  }
+
+  /**
+   * Translation-only request used by manual typed input and translation
+   * retries. Language pair and direction come from the given context (for
+   * retries this is the pair captured when the utterance was processed, not
+   * the current settings).
+   */
+  private runTranslationStage(requestId: string, context: FailedTranslationContext): void {
     const controller = new AbortController();
     this.abortController = controller;
     const startedAt = Date.now();
 
     this.deps.client
       .translateText({
-        text,
-        sourceLanguage,
-        targetLanguage,
-        direction: this.state.direction,
+        text: context.transcript,
+        sourceLanguage: context.sourceLanguage,
+        targetLanguage: context.targetLanguage,
+        direction: context.direction,
         requestId,
         signal: controller.signal,
       })
       .then((response) => {
         this.lastLatencyMs = Date.now() - startedAt;
+        this.lastFailedTranslation = null;
         this.finishRequest(controller);
         this.dispatch({
           type: 'PROCESSING_SUCCEEDED',
           requestId,
-          turn: turnFromResponse(response),
+          turn: {
+            id: requestId,
+            direction: context.direction,
+            sourceLanguage: context.sourceLanguage,
+            targetLanguage: context.targetLanguage,
+            transcript: context.transcript,
+            translation: response.translation,
+            timestamp: Date.now(),
+          },
         });
       })
       .catch((error: unknown) => {
         this.finishRequest(controller);
-        this.handleRequestFailure(requestId, error, null);
+        this.handleTranslationFailure(requestId, error, context);
       });
   }
 
-  private handleRequestFailure(
+  /** Stage-1 failure: nothing was recognized, optionally keep the audio for retry. */
+  private handleTranscriptionFailure(
     requestId: string,
     error: unknown,
-    utterance: Uint8Array | null,
+    utterance: Uint8Array,
   ): void {
     if (error instanceof TranslationClientError && error.code === 'CANCELLED') {
       return; // Deliberate cancellation (toggle/offline/exit) — not an error state.
@@ -354,8 +469,9 @@ export class ConversationController {
       error instanceof TranslationClientError ? error : TranslationClientError.network();
 
     // Keep the utterance for one retry only when a retry could plausibly work.
-    const canRetryUtterance = clientError.retryable && utterance !== null;
+    const canRetryUtterance = clientError.retryable;
     this.lastFailedUtterance = canRetryUtterance ? utterance : null;
+    this.lastFailedTranslation = null;
 
     this.dispatch({
       type: 'PROCESSING_FAILED',
@@ -365,6 +481,36 @@ export class ConversationController {
         message: clientError.userMessage,
         retryable: clientError.retryable,
         canRetryUtterance,
+        canRetryTranslation: false,
+      },
+    });
+  }
+
+  /** Stage-2 failure: the transcript survives so a retry skips transcription. */
+  private handleTranslationFailure(
+    requestId: string,
+    error: unknown,
+    context: FailedTranslationContext,
+  ): void {
+    if (error instanceof TranslationClientError && error.code === 'CANCELLED') {
+      return;
+    }
+    const clientError =
+      error instanceof TranslationClientError ? error : TranslationClientError.network();
+
+    const canRetryTranslation = clientError.retryable;
+    this.lastFailedTranslation = canRetryTranslation ? context : null;
+    this.lastFailedUtterance = null;
+
+    this.dispatch({
+      type: 'PROCESSING_FAILED',
+      requestId,
+      error: {
+        code: clientError.code,
+        message: clientError.userMessage,
+        retryable: clientError.retryable,
+        canRetryUtterance: false,
+        canRetryTranslation,
       },
     });
   }
@@ -401,6 +547,7 @@ export class ConversationController {
           message: 'Microphone unavailable — check permissions',
           retryable: false,
           canRetryUtterance: false,
+          canRetryTranslation: false,
         },
       });
     });
@@ -427,16 +574,4 @@ export class ConversationController {
       listener(snapshot);
     }
   }
-}
-
-function turnFromResponse(response: InterpretSuccessResponse): ConversationTurn {
-  return {
-    id: response.requestId,
-    direction: response.direction,
-    sourceLanguage: response.sourceLanguage,
-    targetLanguage: response.targetLanguage,
-    transcript: response.transcript,
-    translation: response.translation,
-    timestamp: Date.now(),
-  };
 }

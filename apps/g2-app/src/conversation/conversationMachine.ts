@@ -7,12 +7,16 @@
  * reads no clocks, which is what makes every transition unit-testable.
  *
  * Invariants encoded here:
- *   - at most one backend request exists at a time (`activeRequestId`);
- *   - stale PROCESSING_* results (mismatched requestId) are ignored;
+ *   - at most one voice-processing chain exists at a time (`activeRequestId`);
+ *   - stale TRANSCRIPTION_SUCCEEDED / PROCESSING_* results (mismatched
+ *     requestId) are ignored;
  *   - audio is only consumed in the two LISTENING_* states (the controller
  *     additionally drops PCM frames in every other state);
  *   - a toggle during an active request cancels it (CANCEL_ACTIVE_REQUEST →
- *     AbortController in the controller).
+ *     AbortController in the controller);
+ *   - the transient transcript survives from transcription success through
+ *     translation success or failure, and is cleared on every path that
+ *     abandons the utterance (new utterance, toggle, end, offline, exit).
  */
 
 import type { ConversationDirection } from '@turntranslate/shared';
@@ -32,12 +36,25 @@ export type ConversationStatus =
   | 'ERROR'
   | 'EXITING';
 
+/**
+ * Which stage of the two-stage pipeline (final transcription → translation)
+ * is currently running. `translating` is also used for manual typed input,
+ * which skips the transcription stage.
+ */
+export type ProcessingPhase = 'idle' | 'transcribing' | 'translating';
+
 export interface MachineErrorInfo {
   code: string;
   message: string;
   retryable: boolean;
   /** True when the controller still holds the failed utterance for a re-send. */
   canRetryUtterance: boolean;
+  /**
+   * True when transcription succeeded but translation failed: the controller
+   * holds the completed transcript, so a retry can re-run translation only
+   * instead of retranscribing the audio.
+   */
+  canRetryTranslation: boolean;
 }
 
 export type ConversationEvent =
@@ -46,7 +63,13 @@ export type ConversationEvent =
   | { type: 'TOGGLE_DIRECTION' }
   | { type: 'SPEECH_STARTED' }
   | { type: 'UTTERANCE_COMPLETED'; requestId: string }
-  | { type: 'MANUAL_INPUT_SUBMITTED'; requestId: string; direction: ConversationDirection }
+  | {
+      type: 'MANUAL_INPUT_SUBMITTED';
+      requestId: string;
+      direction: ConversationDirection;
+      text: string;
+    }
+  | { type: 'TRANSCRIPTION_SUCCEEDED'; requestId: string; transcript: string }
   | { type: 'PROCESSING_SUCCEEDED'; requestId: string; turn: ConversationTurn }
   | { type: 'PROCESSING_FAILED'; requestId: string; error: MachineErrorInfo }
   | { type: 'RESULT_DISPLAY_ELAPSED' }
@@ -63,6 +86,7 @@ export type ConversationEffect =
   | { type: 'RESET_VAD' }
   | { type: 'BEGIN_REQUEST'; requestId: string; kind: 'utterance' | 'manual' }
   | { type: 'RETRY_LAST_UTTERANCE'; requestId: string }
+  | { type: 'RETRY_TRANSLATION'; requestId: string }
   | { type: 'CANCEL_ACTIVE_REQUEST' }
   | { type: 'SCHEDULE_RESUME' }
   | { type: 'CANCEL_RESUME' }
@@ -74,6 +98,15 @@ export interface MachineState {
   conversationActive: boolean;
   online: boolean;
   activeRequestId: string | null;
+  /** Stage of the active voice chain; `idle` outside PROCESSING_* states. */
+  processingPhase: ProcessingPhase;
+  /**
+   * Completed transcript of the utterance currently being processed. Set when
+   * transcription succeeds, kept through translation (and translation
+   * failure, so the user can see what was recognized), cleared when the turn
+   * completes or the utterance is abandoned.
+   */
+  currentTranscript: string | null;
   history: ConversationTurn[];
   /** Index into history while BROWSING_HISTORY; null otherwise. */
   historyIndex: number | null;
@@ -99,6 +132,8 @@ export function initialMachineState(online: boolean): MachineState {
     conversationActive: false,
     online,
     activeRequestId: null,
+    processingPhase: 'idle',
+    currentTranscript: null,
     history: [],
     historyIndex: null,
     browsingReturnStatus: null,
@@ -155,6 +190,8 @@ function reduce(
           ...state,
           status: 'EXITING',
           activeRequestId: null,
+          processingPhase: 'idle',
+          currentTranscript: null,
           historyIndex: null,
           browsingReturnStatus: null,
           speechActive: false,
@@ -177,6 +214,8 @@ function reduce(
           status: 'OFFLINE',
           online: false,
           activeRequestId: null,
+          processingPhase: 'idle',
+          currentTranscript: null,
           historyIndex: null,
           browsingReturnStatus: null,
           speechActive: false,
@@ -212,6 +251,8 @@ function reduce(
           status: 'SETUP',
           conversationActive: false,
           activeRequestId: null,
+          processingPhase: 'idle',
+          currentTranscript: null,
           historyIndex: null,
           browsingReturnStatus: null,
           speechActive: false,
@@ -232,6 +273,8 @@ function reduce(
           ...state,
           status: 'ERROR',
           activeRequestId: null,
+          processingPhase: 'idle',
+          currentTranscript: null,
           historyIndex: null,
           browsingReturnStatus: null,
           speechActive: false,
@@ -297,7 +340,8 @@ function reduceSetup(state: MachineState, event: ConversationEvent): TransitionR
 function reduceListening(state: MachineState, event: ConversationEvent): TransitionResult {
   switch (event.type) {
     case 'SPEECH_STARTED':
-      return { state: { ...state, speechActive: true }, effects: [] };
+      // A new utterance begins: any leftover transient transcript is stale.
+      return { state: { ...state, speechActive: true, currentTranscript: null }, effects: [] };
 
     case 'UTTERANCE_COMPLETED':
       return {
@@ -305,6 +349,8 @@ function reduceListening(state: MachineState, event: ConversationEvent): Transit
           ...state,
           status: processingStatusFor(state.direction),
           activeRequestId: event.requestId,
+          processingPhase: 'transcribing',
+          currentTranscript: null,
           speechActive: false,
         },
         effects: [{ type: 'BEGIN_REQUEST', requestId: event.requestId, kind: 'utterance' }],
@@ -327,6 +373,22 @@ function reduceProcessing(
   config: MachineConfig,
 ): TransitionResult {
   switch (event.type) {
+    case 'TRANSCRIPTION_SUCCEEDED': {
+      if (event.requestId !== state.activeRequestId) {
+        return { state, effects: [] }; // Stale transcript: ignore entirely.
+      }
+      // The completed transcript becomes visible immediately; the controller
+      // continues its chain with the translation request.
+      return {
+        state: {
+          ...state,
+          processingPhase: 'translating',
+          currentTranscript: event.transcript,
+        },
+        effects: [],
+      };
+    }
+
     case 'PROCESSING_SUCCEEDED': {
       if (event.requestId !== state.activeRequestId) {
         return { state, effects: [] }; // Stale response: ignore entirely.
@@ -339,6 +401,8 @@ function reduceProcessing(
             status: 'READ_ALOUD_PAUSED',
             history,
             activeRequestId: null,
+            processingPhase: 'idle',
+            currentTranscript: null,
             lastError: null,
           },
           effects: [],
@@ -350,6 +414,8 @@ function reduceProcessing(
           status: 'SHOWING_THEM_RESULT',
           history,
           activeRequestId: null,
+          processingPhase: 'idle',
+          currentTranscript: null,
           lastError: null,
         },
         effects: [{ type: 'SCHEDULE_RESUME' }],
@@ -360,14 +426,23 @@ function reduceProcessing(
       if (event.requestId !== state.activeRequestId) {
         return { state, effects: [] }; // Stale failure: ignore.
       }
+      // currentTranscript is deliberately preserved: when translation failed
+      // after a successful transcription, the error display shows what was
+      // recognized and a retry can reuse it.
       return {
-        state: { ...state, status: 'ERROR', activeRequestId: null, lastError: event.error },
+        state: {
+          ...state,
+          status: 'ERROR',
+          activeRequestId: null,
+          processingPhase: 'idle',
+          lastError: event.error,
+        },
         effects: [],
       };
     }
 
     case 'TOGGLE_DIRECTION': {
-      // Toggling while a request is in flight cancels it.
+      // Toggling while a chain is in flight cancels it and drops its transcript.
       const toggled = toggleFromLive({ ...state, activeRequestId: null });
       return { state: toggled.state, effects: [...cancelRequest(), ...toggled.effects] };
     }
@@ -456,13 +531,29 @@ function reduceBrowsing(state: MachineState, event: ConversationEvent): Transiti
 function reduceError(state: MachineState, event: ConversationEvent): TransitionResult {
   switch (event.type) {
     case 'RETRY': {
-      const canRetry = state.lastError?.retryable === true && state.lastError.canRetryUtterance;
-      if (canRetry) {
+      const retryable = state.lastError?.retryable === true;
+      // Prefer re-running translation with the preserved transcript over
+      // retranscribing the audio: cheaper and the transcript is authoritative.
+      if (retryable && state.lastError?.canRetryTranslation && state.currentTranscript !== null) {
         return {
           state: {
             ...state,
             status: processingStatusFor(state.direction),
             activeRequestId: event.requestId,
+            processingPhase: 'translating',
+            lastError: null,
+          },
+          effects: [{ type: 'RETRY_TRANSLATION', requestId: event.requestId }],
+        };
+      }
+      if (retryable && state.lastError?.canRetryUtterance) {
+        return {
+          state: {
+            ...state,
+            status: processingStatusFor(state.direction),
+            activeRequestId: event.requestId,
+            processingPhase: 'transcribing',
+            currentTranscript: null,
             lastError: null,
           },
           effects: [{ type: 'RETRY_LAST_UTTERANCE', requestId: event.requestId }],
@@ -472,6 +563,7 @@ function reduceError(state: MachineState, event: ConversationEvent): TransitionR
         state: {
           ...state,
           status: state.conversationActive ? listeningStatusFor(state.direction) : 'SETUP',
+          currentTranscript: null,
           lastError: null,
         },
         effects: [{ type: 'RESET_VAD' }],
@@ -485,6 +577,7 @@ function reduceError(state: MachineState, event: ConversationEvent): TransitionR
           ...state,
           status: state.conversationActive ? 'LISTENING_TO_THEM' : 'SETUP',
           direction: 'them-to-me',
+          currentTranscript: null,
           lastError: null,
         },
         effects: [{ type: 'RESET_VAD' }],
@@ -518,6 +611,9 @@ function handleManualInput(
       status: processingStatusFor(event.direction),
       direction: event.direction,
       activeRequestId: event.requestId,
+      // Manual input skips transcription: the typed text is the transcript.
+      processingPhase: 'translating',
+      currentTranscript: event.text,
       historyIndex: null,
       browsingReturnStatus: null,
       speechActive: false,
@@ -540,6 +636,8 @@ function toggleFromLive(state: MachineState): TransitionResult {
       ...state,
       status: listeningStatusFor(next),
       direction: next,
+      processingPhase: 'idle',
+      currentTranscript: null,
       speechActive: false,
       lastError: null,
     },

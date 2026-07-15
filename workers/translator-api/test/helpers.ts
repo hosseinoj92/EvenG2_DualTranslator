@@ -98,6 +98,31 @@ export function makeInterpretRequest(overrides: InterpretFormOverrides = {}): Re
   return new Request(`${BASE_URL}/api/v1/interpret`, { method: 'POST', body: form });
 }
 
+export interface TranscribeFormOverrides {
+  audio?: File | null;
+  sourceLanguage?: string | null;
+  requestId?: string | null;
+}
+
+export function makeTranscribeRequest(overrides: TranscribeFormOverrides = {}): Request {
+  const form = new FormData();
+  const audio =
+    overrides.audio === undefined
+      ? new File([makeWavBytes(1000)], 'utterance.wav', { type: 'audio/wav' })
+      : overrides.audio;
+  if (audio) form.append('audio', audio);
+
+  const fields: Record<string, string | null | undefined> = {
+    sourceLanguage: overrides.sourceLanguage === undefined ? 'es' : overrides.sourceLanguage,
+    requestId: overrides.requestId === undefined ? 'req-123' : overrides.requestId,
+  };
+  for (const [key, value] of Object.entries(fields)) {
+    if (value !== null && value !== undefined) form.append(key, value);
+  }
+
+  return new Request(`${BASE_URL}/api/v1/transcribe`, { method: 'POST', body: form });
+}
+
 export function makeTranslateTextRequest(body: unknown): Request {
   return new Request(`${BASE_URL}/api/v1/translate-text`, {
     method: 'POST',

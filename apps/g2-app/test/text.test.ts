@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   normalizeWhitespace,
   stripMarkup,
+  toDisplayBlock,
   toDisplayText,
   truncateWithEllipsis,
 } from '../src/utils/text';
@@ -59,5 +60,26 @@ describe('toDisplayText', () => {
   it('sanitizes and truncates in one pass', () => {
     const input = '  <em>¿Dónde\nestá   la estación?</em>  ';
     expect(toDisplayText(input, 100)).toBe('¿Dónde está la estación?');
+  });
+});
+
+describe('toDisplayBlock', () => {
+  it('preserves intentional line breaks while normalizing each line', () => {
+    const input = '¿Dónde   está?\n\n→  Where   is it?';
+    expect(toDisplayBlock(input, 100)).toBe('¿Dónde está?\n\n→ Where is it?');
+  });
+
+  it('collapses runs of blank lines and trims blank edges', () => {
+    expect(toDisplayBlock('\n\na\n\n\n\nb\n\n', 100)).toBe('a\n\nb');
+  });
+
+  it('strips markup per line and keeps Unicode intact', () => {
+    expect(toDisplayBlock('<b>Größe</b>\n\n**Ça va**', 100)).toBe('Größe\n\nÇa va');
+  });
+
+  it('truncates with an ellipsis when over budget', () => {
+    const result = toDisplayBlock('first line words\n\nsecond line words', 20);
+    expect(result.length).toBeLessThanOrEqual(20);
+    expect(result.endsWith('…')).toBe(true);
   });
 });

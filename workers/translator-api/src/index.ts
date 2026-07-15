@@ -10,6 +10,7 @@ import { configFromEnv } from './env';
 import { notFound, securityHeaders, toErrorResponse } from './errors';
 import { handleHealth } from './routes/health';
 import { handleInterpret } from './routes/interpret';
+import { handleTranscribe } from './routes/transcribe';
 import { handleTranslateText } from './routes/translateText';
 import type { TranscriptionService } from './services/transcriptionService';
 import { createWorkersAiTranscriptionService } from './services/transcriptionService';
@@ -38,6 +39,8 @@ export function createApp(deps: AppDependencies): AppFetch {
         return handleHealth(request, corsHeaders);
       case API_PATHS.interpret:
         return handleInterpret(request, deps, corsHeaders);
+      case API_PATHS.transcribe:
+        return handleTranscribe(request, deps, corsHeaders);
       case API_PATHS.translateText:
         return handleTranslateText(request, deps, corsHeaders);
       default:

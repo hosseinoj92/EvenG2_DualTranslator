@@ -5,7 +5,11 @@
  */
 
 import type { ConversationDirection, LanguageCode } from '@turntranslate/shared';
-import { isConversationDirection, isTranslateTextRequest } from '@turntranslate/shared';
+import {
+  isConversationDirection,
+  isSupportedLanguageCode,
+  isTranslateTextRequest,
+} from '@turntranslate/shared';
 import { ApiError, badRequest } from './errors';
 import type { ApiConfig } from './env';
 import { validateLanguagePairOrThrow } from './services/languageService';
@@ -15,6 +19,13 @@ export interface ValidatedInterpretRequest {
   sourceLanguage: LanguageCode;
   targetLanguage: LanguageCode;
   direction: ConversationDirection;
+  requestId: string;
+  warnings: string[];
+}
+
+export interface ValidatedTranscribeRequest {
+  audio: ArrayBuffer;
+  sourceLanguage: LanguageCode;
   requestId: string;
   warnings: string[];
 }
@@ -33,41 +44,8 @@ export async function parseInterpretRequest(
   request: Request,
   config: ApiConfig,
 ): Promise<ValidatedInterpretRequest> {
-  const contentType = request.headers.get('content-type') ?? '';
-  if (!contentType.toLowerCase().includes('multipart/form-data')) {
-    throw badRequest('Expected multipart/form-data');
-  }
-
-  // Cheap pre-check before buffering the body.
-  const declaredLength = Number(request.headers.get('content-length') ?? '0');
-  if (declaredLength > config.limits.maxAudioBytes + 64 * 1024) {
-    throw new ApiError('AUDIO_TOO_LARGE', 413, 'Uploaded audio exceeds the size limit');
-  }
-
-  let form: FormData;
-  try {
-    form = await request.formData();
-  } catch {
-    throw badRequest('Malformed multipart/form-data body');
-  }
-
-  const audioEntry = form.get('audio');
-  if (audioEntry === null || typeof audioEntry === 'string') {
-    throw badRequest('Missing "audio" file field');
-  }
-  const audioFile = audioEntry as File;
-
-  const mime = (audioFile.type ?? '').toLowerCase();
-  if (mime && !ACCEPTED_AUDIO_MIME_PREFIXES.some((prefix) => mime.startsWith(prefix))) {
-    throw badRequest(`Unsupported audio MIME type "${mime}"; expected audio/wav`);
-  }
-
-  if (audioFile.size === 0) {
-    throw new ApiError('INVALID_AUDIO', 400, 'Uploaded audio file is empty');
-  }
-  if (audioFile.size > config.limits.maxAudioBytes) {
-    throw new ApiError('AUDIO_TOO_LARGE', 413, 'Uploaded audio exceeds the size limit');
-  }
+  const form = await readMultipartForm(request, config);
+  const audioFile = readAudioFile(form, config);
 
   const requestId = readRequestId(form.get('requestId'), config);
   const direction = readDirection(form.get('direction'));
@@ -85,6 +63,70 @@ export async function parseInterpretRequest(
     requestId,
     warnings,
   };
+}
+
+/**
+ * Validates `POST /api/v1/transcribe` input: the same multipart, audio, WAV,
+ * size and requestId rules as /interpret, but only a single source language
+ * and no direction (nothing is translated on this endpoint).
+ */
+export async function parseTranscribeRequest(
+  request: Request,
+  config: ApiConfig,
+): Promise<ValidatedTranscribeRequest> {
+  const form = await readMultipartForm(request, config);
+  const audioFile = readAudioFile(form, config);
+
+  const requestId = readRequestId(form.get('requestId'), config);
+  const sourceLanguage = readLanguage(form.get('sourceLanguage'), 'sourceLanguage');
+
+  const audio = await audioFile.arrayBuffer();
+  const warnings: string[] = [];
+  validateWavPayload(audio, config, warnings);
+
+  return { audio, sourceLanguage, requestId, warnings };
+}
+
+/** Shared multipart parsing with the cheap size pre-check. */
+async function readMultipartForm(request: Request, config: ApiConfig): Promise<FormData> {
+  const contentType = request.headers.get('content-type') ?? '';
+  if (!contentType.toLowerCase().includes('multipart/form-data')) {
+    throw badRequest('Expected multipart/form-data');
+  }
+
+  // Cheap pre-check before buffering the body.
+  const declaredLength = Number(request.headers.get('content-length') ?? '0');
+  if (declaredLength > config.limits.maxAudioBytes + 64 * 1024) {
+    throw new ApiError('AUDIO_TOO_LARGE', 413, 'Uploaded audio exceeds the size limit');
+  }
+
+  try {
+    return await request.formData();
+  } catch {
+    throw badRequest('Malformed multipart/form-data body');
+  }
+}
+
+/** Shared audio-field validation: presence, MIME type, emptiness, size cap. */
+function readAudioFile(form: FormData, config: ApiConfig): File {
+  const audioEntry = form.get('audio');
+  if (audioEntry === null || typeof audioEntry === 'string') {
+    throw badRequest('Missing "audio" file field');
+  }
+  const audioFile = audioEntry as File;
+
+  const mime = (audioFile.type ?? '').toLowerCase();
+  if (mime && !ACCEPTED_AUDIO_MIME_PREFIXES.some((prefix) => mime.startsWith(prefix))) {
+    throw badRequest(`Unsupported audio MIME type "${mime}"; expected audio/wav`);
+  }
+
+  if (audioFile.size === 0) {
+    throw new ApiError('INVALID_AUDIO', 400, 'Uploaded audio file is empty');
+  }
+  if (audioFile.size > config.limits.maxAudioBytes) {
+    throw new ApiError('AUDIO_TOO_LARGE', 413, 'Uploaded audio exceeds the size limit');
+  }
+  return audioFile;
 }
 
 export async function parseTranslateTextRequest(
@@ -146,6 +188,13 @@ function readRequestId(value: unknown, config: ApiConfig): string {
     throw badRequest(`"requestId" exceeds ${config.limits.maxRequestIdLength} characters`);
   }
   return requestId;
+}
+
+function readLanguage(value: unknown, field: string): LanguageCode {
+  if (!isSupportedLanguageCode(value)) {
+    throw new ApiError('UNSUPPORTED_LANGUAGE', 400, `${field} "${String(value)}" is not supported`);
+  }
+  return value;
 }
 
 function readDirection(value: unknown): ConversationDirection {

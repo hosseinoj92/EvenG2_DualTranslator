@@ -159,7 +159,13 @@ describe('utterance processing', () => {
     const staleFailure = reduce(processing, {
       type: 'PROCESSING_FAILED',
       requestId: 'req-old',
-      error: { code: 'X', message: 'x', retryable: true, canRetryUtterance: false },
+      error: {
+        code: 'X',
+        message: 'x',
+        retryable: true,
+        canRetryUtterance: false,
+        canRetryTranslation: false,
+      },
     });
     expect(staleFailure.state.status).toBe('PROCESSING_THEM');
   });
@@ -202,6 +208,7 @@ describe('errors and retry', () => {
           message: 'Could not understand the audio',
           retryable: true,
           canRetryUtterance: true,
+          canRetryTranslation: false,
         },
       },
     ]);
@@ -231,6 +238,7 @@ describe('errors and retry', () => {
           message: 'No speech detected',
           retryable: true,
           canRetryUtterance: false,
+          canRetryTranslation: false,
         },
       },
     ]);
@@ -248,6 +256,7 @@ describe('errors and retry', () => {
         message: 'Microphone unavailable',
         retryable: false,
         canRetryUtterance: false,
+        canRetryTranslation: false,
       },
     });
     expect(state.status).toBe('ERROR');
@@ -301,6 +310,51 @@ describe('history browsing', () => {
     const listening = run([{ type: 'START_CONVERSATION' }]);
     const { state } = reduce(listening, { type: 'HISTORY_PREVIOUS' });
     expect(state.status).toBe('LISTENING_TO_THEM');
+  });
+
+  it('R1 while browsing returns to the state browsing started from', () => {
+    // Enter browsing from READ_ALOUD_PAUSED: R1 must return there, keeping
+    // the mic off so the user can still read the sentence aloud.
+    const readAloud = run([
+      { type: 'START_CONVERSATION' },
+      { type: 'TOGGLE_DIRECTION' },
+      { type: 'UTTERANCE_COMPLETED', requestId: 'r1' },
+      {
+        type: 'PROCESSING_SUCCEEDED',
+        requestId: 'r1',
+        turn: makeTurn({ direction: 'me-to-them' }),
+      },
+    ]);
+    expect(readAloud.status).toBe('READ_ALOUD_PAUSED');
+
+    const browsing = reduce(readAloud, { type: 'HISTORY_PREVIOUS' }).state;
+    expect(browsing.status).toBe('BROWSING_HISTORY');
+
+    const back = reduce(browsing, { type: 'TOGGLE_DIRECTION' });
+    expect(back.state.status).toBe('READ_ALOUD_PAUSED');
+    expect(back.state.historyIndex).toBeNull();
+    expect(back.effects).not.toContainEqual({ type: 'SET_MIC', open: true });
+  });
+
+  it('a new manual result while browsing returns the display to live mode', () => {
+    const browsing = run([
+      { type: 'START_CONVERSATION' },
+      { type: 'UTTERANCE_COMPLETED', requestId: 'r1' },
+      { type: 'PROCESSING_SUCCEEDED', requestId: 'r1', turn: makeTurn() },
+      { type: 'RESULT_DISPLAY_ELAPSED' },
+      { type: 'HISTORY_PREVIOUS' },
+    ]);
+    expect(browsing.status).toBe('BROWSING_HISTORY');
+
+    const { state } = reduce(browsing, {
+      type: 'MANUAL_INPUT_SUBMITTED',
+      requestId: 'm1',
+      direction: 'them-to-me',
+      text: 'hola',
+    });
+    expect(state.status).toBe('PROCESSING_THEM');
+    expect(state.historyIndex).toBeNull();
+    expect(state.browsingReturnStatus).toBeNull();
   });
 
   it('caps history at maxHistoryItems', () => {
@@ -369,8 +423,12 @@ describe('manual input', () => {
       type: 'MANUAL_INPUT_SUBMITTED',
       requestId: 'm1',
       direction: 'me-to-them',
+      text: 'Where is the station?',
     });
     expect(state.status).toBe('PROCESSING_ME');
+    // Manual input skips transcription: the typed text is the transcript.
+    expect(state.processingPhase).toBe('translating');
+    expect(state.currentTranscript).toBe('Where is the station?');
     expect(effects).toContainEqual({ type: 'BEGIN_REQUEST', requestId: 'm1', kind: 'manual' });
 
     const done = reduce(state, {
@@ -390,6 +448,7 @@ describe('manual input', () => {
       type: 'MANUAL_INPUT_SUBMITTED',
       requestId: 'm1',
       direction: 'me-to-them',
+      text: 'hello',
     });
     expect(state.activeRequestId).toBe('req-1');
     expect(effects).toHaveLength(0);
@@ -401,8 +460,169 @@ describe('manual input', () => {
       type: 'MANUAL_INPUT_SUBMITTED',
       requestId: 'm1',
       direction: 'me-to-them',
+      text: 'hello',
     });
     expect(state.status).toBe('OFFLINE');
+  });
+});
+
+describe('two-stage processing phases and transient transcript', () => {
+  const processing = () =>
+    run([{ type: 'START_CONVERSATION' }, { type: 'UTTERANCE_COMPLETED', requestId: 'req-1' }]);
+
+  it('enters PROCESSING with phase transcribing and no transcript', () => {
+    const state = processing();
+    expect(state.processingPhase).toBe('transcribing');
+    expect(state.currentTranscript).toBeNull();
+  });
+
+  it('TRANSCRIPTION_SUCCEEDED stores the transcript and moves to translating', () => {
+    const { state, effects } = reduce(processing(), {
+      type: 'TRANSCRIPTION_SUCCEEDED',
+      requestId: 'req-1',
+      transcript: '¿Dónde está la estación?',
+    });
+    expect(state.status).toBe('PROCESSING_THEM');
+    expect(state.processingPhase).toBe('translating');
+    expect(state.currentTranscript).toBe('¿Dónde está la estación?');
+    expect(effects).toHaveLength(0);
+  });
+
+  it('ignores a stale TRANSCRIPTION_SUCCEEDED from a previous utterance', () => {
+    const state = processing();
+    const stale = reduce(state, {
+      type: 'TRANSCRIPTION_SUCCEEDED',
+      requestId: 'req-old',
+      transcript: 'stale text',
+    });
+    expect(stale.state).toBe(state);
+    expect(stale.state.currentTranscript).toBeNull();
+  });
+
+  it('keeps the transcript between transcription success and translation success', () => {
+    const midTranslation = reduce(processing(), {
+      type: 'TRANSCRIPTION_SUCCEEDED',
+      requestId: 'req-1',
+      transcript: 'hola',
+    }).state;
+    expect(midTranslation.currentTranscript).toBe('hola');
+
+    const done = reduce(midTranslation, {
+      type: 'PROCESSING_SUCCEEDED',
+      requestId: 'req-1',
+      turn: makeTurn(),
+    }).state;
+    expect(done.currentTranscript).toBeNull();
+    expect(done.processingPhase).toBe('idle');
+  });
+
+  it('preserves the transcript when translation fails', () => {
+    const midTranslation = reduce(processing(), {
+      type: 'TRANSCRIPTION_SUCCEEDED',
+      requestId: 'req-1',
+      transcript: 'hola',
+    }).state;
+    const failed = reduce(midTranslation, {
+      type: 'PROCESSING_FAILED',
+      requestId: 'req-1',
+      error: {
+        code: 'TRANSLATION_FAILED',
+        message: 'Translation failed — try again',
+        retryable: true,
+        canRetryUtterance: false,
+        canRetryTranslation: true,
+      },
+    }).state;
+    expect(failed.status).toBe('ERROR');
+    expect(failed.currentTranscript).toBe('hola');
+    expect(failed.processingPhase).toBe('idle');
+  });
+
+  it('RETRY after a translation failure re-runs translation only, keeping the transcript', () => {
+    const failed = run([
+      { type: 'START_CONVERSATION' },
+      { type: 'UTTERANCE_COMPLETED', requestId: 'req-1' },
+      { type: 'TRANSCRIPTION_SUCCEEDED', requestId: 'req-1', transcript: 'hola' },
+      {
+        type: 'PROCESSING_FAILED',
+        requestId: 'req-1',
+        error: {
+          code: 'TRANSLATION_FAILED',
+          message: 'Translation failed — try again',
+          retryable: true,
+          canRetryUtterance: false,
+          canRetryTranslation: true,
+        },
+      },
+    ]);
+    const { state, effects } = reduce(failed, { type: 'RETRY', requestId: 'req-2' });
+    expect(state.status).toBe('PROCESSING_THEM');
+    expect(state.processingPhase).toBe('translating');
+    expect(state.currentTranscript).toBe('hola');
+    expect(effects).toContainEqual({ type: 'RETRY_TRANSLATION', requestId: 'req-2' });
+    expect(effects).not.toContainEqual({ type: 'RETRY_LAST_UTTERANCE', requestId: 'req-2' });
+  });
+
+  it('clears the transcript on direction toggle mid-processing', () => {
+    const midTranslation = reduce(processing(), {
+      type: 'TRANSCRIPTION_SUCCEEDED',
+      requestId: 'req-1',
+      transcript: 'hola',
+    }).state;
+    const { state, effects } = reduce(midTranslation, { type: 'TOGGLE_DIRECTION' });
+    expect(state.currentTranscript).toBeNull();
+    expect(state.processingPhase).toBe('idle');
+    expect(effects).toContainEqual({ type: 'CANCEL_ACTIVE_REQUEST' });
+  });
+
+  it('clears the transcript when going offline', () => {
+    const midTranslation = reduce(processing(), {
+      type: 'TRANSCRIPTION_SUCCEEDED',
+      requestId: 'req-1',
+      transcript: 'hola',
+    }).state;
+    const { state } = reduce(midTranslation, { type: 'NETWORK_OFFLINE' });
+    expect(state.currentTranscript).toBeNull();
+    expect(state.processingPhase).toBe('idle');
+  });
+
+  it('clears the transcript on END_CONVERSATION and EXIT', () => {
+    const midTranslation = reduce(processing(), {
+      type: 'TRANSCRIPTION_SUCCEEDED',
+      requestId: 'req-1',
+      transcript: 'hola',
+    }).state;
+    expect(reduce(midTranslation, { type: 'END_CONVERSATION' }).state.currentTranscript).toBeNull();
+    expect(reduce(midTranslation, { type: 'EXIT' }).state.currentTranscript).toBeNull();
+  });
+
+  it('clears a leftover transcript when a new utterance starts', () => {
+    const errored = run([
+      { type: 'START_CONVERSATION' },
+      { type: 'UTTERANCE_COMPLETED', requestId: 'req-1' },
+      { type: 'TRANSCRIPTION_SUCCEEDED', requestId: 'req-1', transcript: 'hola' },
+      {
+        type: 'PROCESSING_FAILED',
+        requestId: 'req-1',
+        error: {
+          code: 'TRANSLATION_FAILED',
+          message: 'x',
+          retryable: false,
+          canRetryUtterance: false,
+          canRetryTranslation: false,
+        },
+      },
+      { type: 'RETRY', requestId: 'req-2' }, // Not retryable → back to listening.
+    ]);
+    expect(errored.status).toBe('LISTENING_TO_THEM');
+    expect(errored.currentTranscript).toBeNull();
+
+    const speaking = reduce(errored, { type: 'SPEECH_STARTED' }).state;
+    expect(speaking.currentTranscript).toBeNull();
+
+    const next = reduce(speaking, { type: 'UTTERANCE_COMPLETED', requestId: 'req-3' }).state;
+    expect(next.currentTranscript).toBeNull();
+    expect(next.processingPhase).toBe('transcribing');
   });
 });
 

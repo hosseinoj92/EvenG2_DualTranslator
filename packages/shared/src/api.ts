@@ -23,6 +23,7 @@ export function isConversationDirection(value: unknown): value is ConversationDi
 export const API_PATHS = {
   health: '/health',
   interpret: '/api/v1/interpret',
+  transcribe: '/api/v1/transcribe',
   translateText: '/api/v1/translate-text',
 } as const;
 
@@ -49,6 +50,20 @@ export interface InterpretSuccessResponse {
   translation: string;
   processingTimeMs: number;
   warnings: string[];
+}
+
+/**
+ * Body of `POST /api/v1/transcribe` (multipart/form-data): `audio` (WAV file),
+ * `sourceLanguage`, `requestId`. Transcription only — no translation happens
+ * on this endpoint; the client translates the returned transcript separately
+ * via `POST /api/v1/translate-text`.
+ */
+export interface TranscriptionSuccessResponse {
+  requestId: string;
+  sourceLanguage: LanguageCode;
+  /** The final transcript of the completed utterance, in the source language. */
+  transcript: string;
+  processingTimeMs: number;
 }
 
 export type ApiErrorCode =
