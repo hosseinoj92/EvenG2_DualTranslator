@@ -74,7 +74,7 @@ export const appConfig = {
     /** Ignore direction-toggle clicks arriving faster than this. */
     toggleDebounceMs: 400,
     /** How long an incoming translation stays "fresh" before auto-resuming listening. */
-    incomingResultResumeDelayMs: 1_500,
+    incomingResultResumeDelayMs: 6_000,
     /** In-memory conversation history cap. */
     maxHistoryItems: 20,
   },
