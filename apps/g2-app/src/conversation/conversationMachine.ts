@@ -373,12 +373,19 @@ function reduceListening(state: MachineState, event: ConversationEvent): Transit
       };
 
     case 'PARTIAL_TRANSCRIPT':
-      // Live preview of the sentence still being spoken. Only accepted while
-      // actually recording; anything arriving later belongs to a dead preview.
-      // The previous partial translation is kept (it is a prefix of the new
-      // text) so the display stays stable until the fresher one arrives.
+      // Whisper can revise earlier words when more audio becomes available.
+      // Never show a translation produced for an older transcript underneath
+      // the new transcript.
       if (!state.speechActive) return { state, effects: [] };
-      return { state: { ...state, partialTranscript: event.transcript }, effects: [] };
+
+      return {
+        state: {
+          ...state,
+          partialTranscript: event.transcript,
+          partialTranslation: null,
+        },
+        effects: [],
+      };
 
     case 'PARTIAL_TRANSLATION':
       if (!state.speechActive || state.partialTranscript === null) {

@@ -63,9 +63,15 @@ export class ConversationController {
 
   private abortController: AbortController | null = null;
   private resumeTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // Live-preview state. At most one preview request is active. While it runs,
+  // only the newest cumulative PCM snapshot is retained.
   private previewTimer: ReturnType<typeof setInterval> | null = null;
   private previewAbort: AbortController | null = null;
-  private previewBusy = false;
+  private queuedPreviewPcm: Uint8Array | null = null;
+  private previewRequestsUsed = 0;
+  private lastPreviewBytesSubmitted = 0;
+
   /** Bumped on every speech start; stale preview results are dropped by it. */
   private utteranceGeneration = 0;
   private pendingUtterance: Uint8Array | null = null;
@@ -207,9 +213,18 @@ export class ConversationController {
 
   updateSettings(settings: LanguageSettings): void {
     if (settings.myLanguage === settings.otherLanguage) return;
+
+    // Keep the active conversation internally consistent. The phone UI should
+    // disable language controls during a conversation, but this guard also
+    // protects direct calls.
+    if (this.state.conversationActive) return;
+
+    this.utteranceGeneration += 1;
+    this.stopPreviewLoop();
+    this.vad.reset();
+
     this.settings = settings;
     this.deps.onSettingsChanged?.(settings);
-    this.vad.reset();
     this.emitSnapshot();
   }
 
@@ -311,11 +326,22 @@ export class ConversationController {
 
   // ----- live preview (audio-so-far, best effort) ---------------------------
 
+  private static readonly MAX_PREVIEW_REQUESTS_PER_UTTERANCE = 13;
+
   private startPreviewLoop(): void {
     const preview = this.deps.config.livePreview;
-    if (!preview.enabled) return;
+
+    // Clear any preview state left by an older utterance.
     this.stopPreviewLoop();
-    this.previewTimer = setInterval(() => this.runPreviewPass(), preview.intervalMs);
+    this.previewRequestsUsed = 0;
+    this.lastPreviewBytesSubmitted = 0;
+
+    if (!preview.enabled) return;
+
+    this.previewTimer = setInterval(
+      () => this.capturePreviewSnapshot(),
+      preview.intervalMs,
+    );
   }
 
   private stopPreviewLoop(): void {
@@ -323,21 +349,33 @@ export class ConversationController {
       clearInterval(this.previewTimer);
       this.previewTimer = null;
     }
+
     this.previewAbort?.abort();
     this.previewAbort = null;
-    this.previewBusy = false;
+    this.queuedPreviewPcm = null;
   }
 
   /**
-   * One preview pass: transcribe the audio recorded so far, show it, then
-   * translate it and show that too. Previews are strictly best-effort: at
-   * most one is in flight, failures are silent, and results are dropped when
-   * the utterance they belong to is no longer the live one.
+   * Capture the newest cumulative utterance snapshot.
+   *
+   * When a preview is already active, retain only the latest snapshot. This
+   * prevents concurrent Cloudflare requests while also avoiding falling behind
+   * during long sentences.
    */
-  private runPreviewPass(): void {
-    if (this.previewBusy) return;
-    if (this.state.status !== 'LISTENING_TO_THEM' && this.state.status !== 'LISTENING_TO_ME') {
+  private capturePreviewSnapshot(): void {
+    const isListening =
+      this.state.status === 'LISTENING_TO_THEM' ||
+      this.state.status === 'LISTENING_TO_ME';
+
+    if (!isListening || !this.state.speechActive) {
       this.stopPreviewLoop();
+      return;
+    }
+
+    if (
+      this.previewRequestsUsed >=
+      ConversationController.MAX_PREVIEW_REQUESTS_PER_UTTERANCE
+    ) {
       return;
     }
 
@@ -346,15 +384,59 @@ export class ConversationController {
     const minBytes =
       ((sampleRateHz * (bitsPerSample / 8) * channels) / 1000) *
       this.deps.config.livePreview.minAudioMs;
+
     if (!pcm || pcm.length < minBytes) return;
+    if (pcm.length <= this.lastPreviewBytesSubmitted) return;
+
+    if (this.previewAbort !== null) {
+      if (this.queuedPreviewPcm === null || pcm.length > this.queuedPreviewPcm.length) {
+        this.queuedPreviewPcm = pcm;
+      }
+      return;
+    }
+
+    this.startPreviewPass(pcm);
+  }
+
+  /**
+   * Transcribe and translate one cumulative audio snapshot.
+   *
+   * Only the active preview operation may update preview ownership. Results
+   * from an aborted or superseded operation are ignored.
+   */
+  private startPreviewPass(pcm: Uint8Array): void {
+    if (this.previewAbort !== null) return;
+
+    if (
+      this.previewRequestsUsed >=
+      ConversationController.MAX_PREVIEW_REQUESTS_PER_UTTERANCE
+    ) {
+      return;
+    }
+
+    const isListening =
+      this.state.status === 'LISTENING_TO_THEM' ||
+      this.state.status === 'LISTENING_TO_ME';
+
+    if (!isListening || !this.state.speechActive) return;
 
     const generation = this.utteranceGeneration;
     const direction = this.state.direction;
     const { sourceLanguage, targetLanguage } = this.languagesFor(direction);
-    const wav = encodeWav(pcm, this.deps.config.audio);
     const controller = new AbortController();
+    const wav = encodeWav(pcm, this.deps.config.audio);
+
     this.previewAbort = controller;
-    this.previewBusy = true;
+    this.previewRequestsUsed += 1;
+    this.lastPreviewBytesSubmitted = pcm.length;
+
+    const operationIsCurrent = (): boolean =>
+      this.previewAbort === controller &&
+      generation === this.utteranceGeneration &&
+      !controller.signal.aborted &&
+      this.state.speechActive &&
+      (this.state.status === 'LISTENING_TO_THEM' ||
+        this.state.status === 'LISTENING_TO_ME');
 
     const pass = async (): Promise<void> => {
       try {
@@ -364,30 +446,75 @@ export class ConversationController {
           requestId: makeId(),
           signal: controller.signal,
         });
-        if (generation !== this.utteranceGeneration || controller.signal.aborted) return;
-        this.dispatch({ type: 'PARTIAL_TRANSCRIPT', transcript: transcription.transcript });
 
-        const translationRequestId = makeId();
+        if (!operationIsCurrent()) return;
+
+        const transcript = transcription.transcript.trim();
+        if (transcript.length === 0) return;
+
+        /*
+         * Do not leave an older translation under a newer transcript. For an
+         * existing preview, replace the translation with a temporary status
+         * before publishing the updated transcript.
+         */
+        if (this.state.partialTranscript !== null) {
+          this.dispatch({
+            type: 'PARTIAL_TRANSLATION',
+            translation: 'Translating…',
+          });
+        }
+
+        this.dispatch({
+          type: 'PARTIAL_TRANSCRIPT',
+          transcript,
+        });
+
         const response = await this.deps.client.translateText({
-          text: transcription.transcript,
+          text: transcript,
           sourceLanguage,
           targetLanguage,
           direction,
-          requestId: translationRequestId,
+          requestId: makeId(),
           signal: controller.signal,
         });
-        if (generation !== this.utteranceGeneration || controller.signal.aborted) return;
-        this.dispatch({ type: 'PARTIAL_TRANSLATION', translation: response.translation });
+
+        if (!operationIsCurrent()) return;
+
+        this.dispatch({
+          type: 'PARTIAL_TRANSLATION',
+          translation: response.translation,
+        });
       } catch {
-        // Preview failures are invisible: the final chain is authoritative
-        // and its own error handling covers real problems.
+        // Preview failures are intentionally nonfatal. The final full-utterance
+        // chain remains authoritative and has its own error handling.
       } finally {
-        this.previewBusy = false;
-        if (this.previewAbort === controller) {
-          this.previewAbort = null;
+        /*
+         * An old aborted preview must never clear ownership belonging to a
+         * newer preview operation.
+         */
+        if (this.previewAbort !== controller) return;
+
+        this.previewAbort = null;
+
+        const queued = this.queuedPreviewPcm;
+        this.queuedPreviewPcm = null;
+
+        const canContinue =
+          queued !== null &&
+          queued.length > this.lastPreviewBytesSubmitted &&
+          generation === this.utteranceGeneration &&
+          this.state.speechActive &&
+          (this.state.status === 'LISTENING_TO_THEM' ||
+            this.state.status === 'LISTENING_TO_ME') &&
+          this.previewRequestsUsed <
+            ConversationController.MAX_PREVIEW_REQUESTS_PER_UTTERANCE;
+
+        if (canContinue) {
+          this.startPreviewPass(queued);
         }
       }
     };
+
     void pass();
   }
 

@@ -65,7 +65,7 @@ export const appConfig = {
      * breathe and pause to think mid-sentence, and a natural pause must not
      * split one thought into two premature translations.
      */
-    endSilenceMs: 1_500,
+    endSilenceMs: 1_800,
     /** Hard stop: force-finish the utterance at this length. */
     maximumUtteranceMs: 30_000,
     /** Normalized RMS a frame must exceed to count as speech. */
@@ -82,19 +82,20 @@ export const appConfig = {
    * Each preview is a billed Workers AI call; set `enabled: false` to return
    * to strict one-request-per-utterance behaviour.
    */
-  livePreview: {
-    enabled: true as boolean,
-    /** How often the audio-so-far is sent for a preview pass. */
-    intervalMs: 1_500,
-    /** Skip previews until at least this much audio has accumulated. */
-    minAudioMs: 1_200,
-  },
+livePreview: {
+  enabled: true as boolean,
+  intervalMs: 1_500,
+  minAudioMs: 1_200,
+
+  /** Maximum cumulative preview passes before the authoritative final pass. */
+  maxPreviewRequestsPerUtterance: 8,
+},
 
   conversation: {
     /** Ignore direction-toggle clicks arriving faster than this. */
     toggleDebounceMs: 400,
     /** How long an incoming translation stays "fresh" before auto-resuming listening. */
-    incomingResultResumeDelayMs: 30_000,
+    incomingResultResumeDelayMs: 20_000,
     /** In-memory conversation history cap. */
     maxHistoryItems: 20,
   },

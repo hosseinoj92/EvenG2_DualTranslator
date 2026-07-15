@@ -318,27 +318,55 @@ describe('live preview while speaking', () => {
     controller.dispose();
   });
 
-  it('keeps at most one preview in flight', async () => {
+  it('keeps one preview active and queues only the newest audio snapshot', async () => {
     vi.useFakeTimers();
+
     const client = new MockClient();
     const controller = makeController(client);
+
     controller.startConversation();
+
+    // First 1.5 seconds of continuous speech.
     speakWithoutFinishing(controller);
 
+    // The first timer tick starts preview 1.
     await vi.advanceTimersByTimeAsync(appConfig.livePreview.intervalMs);
+
     expect(client.transcribeCalls).toHaveLength(1);
 
-    // The first preview is still unresolved: later ticks are skipped.
-    await vi.advanceTimersByTimeAsync(appConfig.livePreview.intervalMs * 3);
+    // The person continues speaking while preview 1 is unresolved.
+    speakWithoutFinishing(controller);
+
+    // The next timer tick captures newer cumulative audio, but it must not
+    // create a concurrent request. It is stored as the queued snapshot.
+    await vi.advanceTimersByTimeAsync(appConfig.livePreview.intervalMs);
+
     expect(client.transcribeCalls).toHaveLength(1);
 
+    // Complete preview 1.
     client.resolveTranscription(0, 'so far');
     await vi.advanceTimersByTimeAsync(0);
-    client.resolveTranslation(0, 'bis jetzt');
+
+    expect(client.translateCalls).toHaveLength(1);
+
+    client.resolveTranslation(0, 'hasta ahora');
     await vi.advanceTimersByTimeAsync(0);
 
-    await vi.advanceTimersByTimeAsync(appConfig.livePreview.intervalMs);
-    expect(client.transcribeCalls).toHaveLength(2); // next tick runs again
+    // The newest queued snapshot starts immediately. It does not wait for
+    // another timer tick.
+    expect(client.transcribeCalls).toHaveLength(2);
+
+    // Continue speaking while preview 2 is unresolved.
+    speakWithoutFinishing(controller);
+
+    await vi.advanceTimersByTimeAsync(
+      appConfig.livePreview.intervalMs * 3,
+    );
+
+    // Further timer ticks may replace the queued snapshot, but they must never
+    // create preview 3 while preview 2 is still active.
+    expect(client.transcribeCalls).toHaveLength(2);
+
     controller.dispose();
   });
 
@@ -666,6 +694,46 @@ describe('manual typed translation', () => {
     await flush();
     expect(controller.snapshot().status).toBe('SHOWING_THEM_RESULT');
     expect(controller.snapshot().latestTurn?.direction).toBe('them-to-me');
+    controller.dispose();
+  });
+});
+
+describe('language settings safety', () => {
+  it('does not change languages during an active conversation', () => {
+    const client = new MockClient();
+    const controller = makeController(client);
+
+    expect(controller.snapshot().settings).toEqual({
+      myLanguage: 'en',
+      otherLanguage: 'es',
+    });
+
+    controller.startConversation();
+
+    controller.updateSettings({
+      myLanguage: 'de',
+      otherLanguage: 'fr',
+    });
+
+    // Active conversation keeps its original language pair.
+    expect(controller.snapshot().settings).toEqual({
+      myLanguage: 'en',
+      otherLanguage: 'es',
+    });
+
+    controller.endConversation();
+
+    controller.updateSettings({
+      myLanguage: 'de',
+      otherLanguage: 'fr',
+    });
+
+    // Settings may be changed after the conversation ends.
+    expect(controller.snapshot().settings).toEqual({
+      myLanguage: 'de',
+      otherLanguage: 'fr',
+    });
+
     controller.dispose();
   });
 });
