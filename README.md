@@ -46,7 +46,7 @@ German, French, Italian, Portuguese, Dutch, Turkish).
 | Backend     | Cloudflare Worker with Workers AI (`whisper-large-v3-turbo` for speech-to-text, `m2m100-1.2b` for translation) |
 | Audio       | G2 mic, PCM s16le @ 16 kHz mono, local RMS voice-activity detection, WAV upload of completed utterances only   |
 | Display     | 576 × 288 panel, three text containers (header / body / footer)                                                |
-| Controls    | R1 ring / touchpad single click (switch speaker), double click (exit), phone buttons                          |
+| Controls    | R1 ring / touchpad single click (switch speaker), double click (exit), phone buttons                           |
 
 ## 2. Conversation workflow
 
