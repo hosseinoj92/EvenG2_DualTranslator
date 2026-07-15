@@ -7,7 +7,7 @@
 
 import type { ConversationDirection } from '@turntranslate/shared';
 import { SUPPORTED_LANGUAGES, getLanguage } from '@turntranslate/shared';
-import type { AppSnapshot, ConversationTurn } from '../types';
+import type { AppSnapshot } from '../types';
 
 export interface CompanionUiCallbacks {
   onStartConversation(): void;
@@ -107,14 +107,6 @@ export function mountCompanionUi(root: HTMLElement, callbacks: CompanionUiCallba
   manualRow.append(manualMeButton, manualThemButton);
   manualPanel.append(manualInput, manualRow);
 
-  // ----- history panel ----------------------------------------------------------
-  const historyPanel = el('section', 'tt-panel');
-  historyPanel.append(heading('History'));
-  const historyList = el('ul', 'tt-history');
-  const historyEmpty = el('div', 'tt-empty');
-  historyEmpty.textContent = 'No translations yet';
-  historyPanel.append(historyEmpty, historyList);
-
   // ----- diagnostics -------------------------------------------------------------
   const diagnostics = document.createElement('details');
   diagnostics.className = 'tt-diagnostics';
@@ -130,10 +122,9 @@ export function mountCompanionUi(root: HTMLElement, callbacks: CompanionUiCallba
   };
   diagnostics.append(diagSummary, diagGrid);
 
-  app.append(titlebar, convPanel, langPanel, resultPanel, manualPanel, historyPanel, diagnostics);
+  app.append(titlebar, convPanel, langPanel, resultPanel, manualPanel, diagnostics);
 
   // ----- update -------------------------------------------------------------------
-  let lastHistoryStamp = '';
 
   function update(snapshot: AppSnapshot): void {
     setChip(
@@ -162,8 +153,6 @@ export function mountCompanionUi(root: HTMLElement, callbacks: CompanionUiCallba
     otherSelect.select.value = snapshot.settings.otherLanguage;
 
     renderResult(snapshot);
-
-    renderHistory(snapshot);
 
     diagRows.state.textContent = snapshot.status;
     diagRows.rms.textContent = snapshot.vad.rms.toFixed(4);
@@ -213,31 +202,10 @@ export function mountCompanionUi(root: HTMLElement, callbacks: CompanionUiCallba
       translatedText.textContent = 'Translation unavailable';
       return;
     }
-    const shown = snapshot.browsingTurn ?? snapshot.latestTurn;
+    const shown = snapshot.latestTurn;
     resultSpeaker.textContent = shown ? speakerLabel(shown.direction) : '';
     sourceText.textContent = shown ? shown.transcript : '—';
     translatedText.textContent = shown ? shown.translation : '—';
-  }
-
-  function renderHistory(snapshot: AppSnapshot): void {
-    // Rebuild only when content or highlight changed; cheap enough at ≤20 items.
-    const stamp =
-      snapshot.history.map((turn) => turn.id).join('|') + `#${snapshot.historyIndex ?? -1}`;
-    if (stamp === lastHistoryStamp) return;
-    lastHistoryStamp = stamp;
-
-    historyEmpty.style.display = snapshot.history.length === 0 ? '' : 'none';
-    historyList.replaceChildren(
-      ...[...snapshot.history]
-        .reverse()
-        .map((turn, reverseIndex) =>
-          historyItem(
-            turn,
-            snapshot.historyIndex !== null &&
-              snapshot.history.length - 1 - reverseIndex === snapshot.historyIndex,
-          ),
-        ),
-    );
   }
 
   return { update };
@@ -305,23 +273,6 @@ function speakerLabel(direction: ConversationDirection): string {
   return direction === 'them-to-me' ? 'THEM' : 'YOU';
 }
 
-function historyItem(turn: ConversationTurn, active: boolean): HTMLElement {
-  const item = el('li');
-  if (active) item.classList.add('active');
-  const meta = el('div', 'meta');
-  // Languages come from the stored turn, never from the current settings —
-  // historical items stay correct after the pair is changed.
-  const source = getLanguage(turn.sourceLanguage).shortLabel;
-  const target = getLanguage(turn.targetLanguage).shortLabel;
-  meta.textContent = `${speakerLabel(turn.direction)} · ${source} → ${target} · ${new Date(turn.timestamp).toLocaleTimeString()}`;
-  const src = el('p', 'line src');
-  src.textContent = turn.transcript;
-  const dst = el('p', 'line dst');
-  dst.textContent = turn.translation;
-  item.append(meta, src, dst);
-  return item;
-}
-
 function describeDirection(snapshot: AppSnapshot): string {
   const my = getLanguage(snapshot.settings.myLanguage);
   const other = getLanguage(snapshot.settings.otherLanguage);
@@ -346,8 +297,6 @@ function statusHint(snapshot: AppSnapshot): string {
       return 'Translation shown on the glasses.';
     case 'READ_ALOUD_PAUSED':
       return 'Read the translation on the glasses aloud, then switch back.';
-    case 'BROWSING_HISTORY':
-      return 'Browsing history on the glasses.';
     case 'OFFLINE':
       return 'Offline — translations resume when the connection returns.';
     case 'ERROR':

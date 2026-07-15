@@ -3,7 +3,6 @@ import type { DisplayInput } from '../src/even/displayModel';
 import {
   BODY_BUDGETS,
   buildDisplayModel,
-  composeHistoryBody,
   composeTranslationPendingBody,
   composeTurnBody,
 } from '../src/even/displayModel';
@@ -37,9 +36,6 @@ function makeInput(overrides: Partial<DisplayInput> = {}): DisplayInput {
     currentTranscript: null,
     settings: { myLanguage: 'en', otherLanguage: 'es' },
     latestTurn: null,
-    browsingTurn: null,
-    historyIndex: null,
-    historyLength: 0,
     error: null,
     ...overrides,
   };
@@ -267,72 +263,6 @@ describe('composed bodies', () => {
     expect(composeTranslationPendingBody('Where is the station?')).toBe(
       'Where is the station?\n\nTranslating…',
     );
-  });
-});
-
-describe('history browsing layouts', () => {
-  it('incoming history shows THEM, position, and both texts', () => {
-    const model = buildDisplayModel(
-      makeInput({
-        status: 'BROWSING_HISTORY',
-        browsingTurn: makeTurn(),
-        historyIndex: 2,
-        historyLength: 8,
-      }),
-    );
-    expect(model.header).toBe('HISTORY · 3 / 8 · THEM');
-    expect(model.body).toContain('¿Dónde está la estación?');
-    expect(model.body).toContain('→ Where is the station?');
-    expect(model.footer).toBe('Swipe: browse · R1: live');
-  });
-
-  it('outgoing history shows YOU and both texts, translation second', () => {
-    const turn = makeTurn({
-      direction: 'me-to-them',
-      sourceLanguage: 'en',
-      targetLanguage: 'es',
-      transcript: 'Where is the station?',
-      translation: '¿Dónde está la estación?',
-    });
-    const model = buildDisplayModel(
-      makeInput({
-        status: 'BROWSING_HISTORY',
-        browsingTurn: turn,
-        historyIndex: 3,
-        historyLength: 8,
-      }),
-    );
-    expect(model.header).toBe('HISTORY · 4 / 8 · YOU');
-    expect(model.body).toBe('Where is the station?\n\n→ ¿Dónde está la estación?');
-  });
-
-  it('history layout is driven by the stored turn, not current settings', () => {
-    // Settings have since been switched to de↔fr; the stored turn is es→en.
-    const model = buildDisplayModel(
-      makeInput({
-        status: 'BROWSING_HISTORY',
-        settings: { myLanguage: 'de', otherLanguage: 'fr' },
-        browsingTurn: makeTurn(),
-        historyIndex: 0,
-        historyLength: 1,
-      }),
-    );
-    expect(model.body).toContain('¿Dónde está la estación?');
-    expect(model.body).toContain('Where is the station?');
-    expect(model.header).toBe('HISTORY · 1 / 1 · THEM');
-  });
-
-  it('truncates long history texts independently', () => {
-    const turn = makeTurn({
-      transcript: 'palabra '.repeat(80).trim(),
-      translation: 'word '.repeat(80).trim(),
-    });
-    const body = composeHistoryBody(turn);
-    const [sourcePart, translationPart] = body.split('\n\n→ ');
-    expect(sourcePart!.length).toBeLessThanOrEqual(BODY_BUDGETS.source);
-    expect(translationPart!.length).toBeLessThanOrEqual(BODY_BUDGETS.translation);
-    expect(sourcePart!.endsWith('…')).toBe(true);
-    expect(translationPart!.endsWith('…')).toBe(true);
   });
 });
 

@@ -3,10 +3,8 @@ import type { ConversationEvent, MachineState } from '../src/conversation/conver
 import { conversationReducer, initialMachineState } from '../src/conversation/conversationMachine';
 import type { ConversationTurn } from '../src/types';
 
-const config = { maxHistoryItems: 20 };
-
 function reduce(state: MachineState, event: ConversationEvent) {
-  return conversationReducer(state, event, config);
+  return conversationReducer(state, event);
 }
 
 function run(events: ConversationEvent[], from?: MachineState): MachineState {
@@ -109,7 +107,7 @@ describe('utterance processing', () => {
       turn: makeTurn(),
     });
     expect(state.status).toBe('SHOWING_THEM_RESULT');
-    expect(state.history).toHaveLength(1);
+    expect(state.latestTurn).toEqual(makeTurn());
     expect(state.activeRequestId).toBeNull();
     // No scheduled resume of any kind and no mic reopening: the result
     // stays until R1.
@@ -273,123 +271,14 @@ describe('errors and retry', () => {
   });
 });
 
-describe('history browsing', () => {
+describe('latest turn only — no history', () => {
   // Results only leave via R1: toggle to me and back to return to listening.
   const backToListening: ConversationEvent[] = [
     { type: 'TOGGLE_DIRECTION' },
     { type: 'TOGGLE_DIRECTION' },
   ];
 
-  const withTwoTurns = () =>
-    run([
-      { type: 'START_CONVERSATION' },
-      { type: 'UTTERANCE_COMPLETED', requestId: 'r1' },
-      { type: 'PROCESSING_SUCCEEDED', requestId: 'r1', turn: makeTurn({ id: 't1' }) },
-      ...backToListening,
-      { type: 'UTTERANCE_COMPLETED', requestId: 'r2' },
-      { type: 'PROCESSING_SUCCEEDED', requestId: 'r2', turn: makeTurn({ id: 't2' }) },
-      ...backToListening,
-    ]);
-
-  it('enters browsing at the newest item and steps backwards', () => {
-    const live = withTwoTurns();
-    expect(live.status).toBe('LISTENING_TO_THEM');
-
-    const browsing = reduce(live, { type: 'HISTORY_PREVIOUS' });
-    expect(browsing.state.status).toBe('BROWSING_HISTORY');
-    expect(browsing.state.historyIndex).toBe(1);
-    expect(browsing.effects).toContainEqual({ type: 'SET_MIC', open: false });
-
-    const older = reduce(browsing.state, { type: 'HISTORY_PREVIOUS' });
-    expect(older.state.historyIndex).toBe(0);
-
-    // Clamp at the oldest item.
-    const clamped = reduce(older.state, { type: 'HISTORY_PREVIOUS' });
-    expect(clamped.state.historyIndex).toBe(0);
-  });
-
-  it('HISTORY_NEXT walks forward and exits past the newest item', () => {
-    const live = withTwoTurns();
-    let state = reduce(live, { type: 'HISTORY_PREVIOUS' }).state;
-    state = reduce(state, { type: 'HISTORY_PREVIOUS' }).state; // index 0
-
-    state = reduce(state, { type: 'HISTORY_NEXT' }).state;
-    expect(state.historyIndex).toBe(1);
-
-    const exit = reduce(state, { type: 'HISTORY_NEXT' });
-    expect(exit.state.status).toBe('LISTENING_TO_THEM');
-    expect(exit.state.historyIndex).toBeNull();
-    expect(exit.effects).toContainEqual({ type: 'SET_MIC', open: true });
-  });
-
-  it('ignores browsing events when there is no history', () => {
-    const listening = run([{ type: 'START_CONVERSATION' }]);
-    const { state } = reduce(listening, { type: 'HISTORY_PREVIOUS' });
-    expect(state.status).toBe('LISTENING_TO_THEM');
-  });
-
-  it('browsing entered from SHOWING_THEM_RESULT returns to the still-displayed result', () => {
-    const showing = run([
-      { type: 'START_CONVERSATION' },
-      { type: 'UTTERANCE_COMPLETED', requestId: 'r1' },
-      { type: 'PROCESSING_SUCCEEDED', requestId: 'r1', turn: makeTurn() },
-    ]);
-    const browsing = reduce(showing, { type: 'HISTORY_PREVIOUS' }).state;
-    expect(browsing.status).toBe('BROWSING_HISTORY');
-    expect(browsing.browsingReturnStatus).toBe('SHOWING_THEM_RESULT');
-
-    const back = reduce(browsing, { type: 'TOGGLE_DIRECTION' });
-    expect(back.state.status).toBe('SHOWING_THEM_RESULT');
-    // The mic must stay closed while a completed result is displayed.
-    expect(back.effects).not.toContainEqual({ type: 'SET_MIC', open: true });
-  });
-
-  it('R1 while browsing returns to the state browsing started from', () => {
-    // Enter browsing from READ_ALOUD_PAUSED: R1 must return there, keeping
-    // the mic off so the user can still read the sentence aloud.
-    const readAloud = run([
-      { type: 'START_CONVERSATION' },
-      { type: 'TOGGLE_DIRECTION' },
-      { type: 'UTTERANCE_COMPLETED', requestId: 'r1' },
-      {
-        type: 'PROCESSING_SUCCEEDED',
-        requestId: 'r1',
-        turn: makeTurn({ direction: 'me-to-them' }),
-      },
-    ]);
-    expect(readAloud.status).toBe('READ_ALOUD_PAUSED');
-
-    const browsing = reduce(readAloud, { type: 'HISTORY_PREVIOUS' }).state;
-    expect(browsing.status).toBe('BROWSING_HISTORY');
-
-    const back = reduce(browsing, { type: 'TOGGLE_DIRECTION' });
-    expect(back.state.status).toBe('READ_ALOUD_PAUSED');
-    expect(back.state.historyIndex).toBeNull();
-    expect(back.effects).not.toContainEqual({ type: 'SET_MIC', open: true });
-  });
-
-  it('a new manual result while browsing returns the display to live mode', () => {
-    const browsing = run([
-      { type: 'START_CONVERSATION' },
-      { type: 'UTTERANCE_COMPLETED', requestId: 'r1' },
-      { type: 'PROCESSING_SUCCEEDED', requestId: 'r1', turn: makeTurn() },
-      ...backToListening,
-      { type: 'HISTORY_PREVIOUS' },
-    ]);
-    expect(browsing.status).toBe('BROWSING_HISTORY');
-
-    const { state } = reduce(browsing, {
-      type: 'MANUAL_INPUT_SUBMITTED',
-      requestId: 'm1',
-      direction: 'them-to-me',
-      text: 'hola',
-    });
-    expect(state.status).toBe('PROCESSING_THEM');
-    expect(state.historyIndex).toBeNull();
-    expect(state.browsingReturnStatus).toBeNull();
-  });
-
-  it('caps history at maxHistoryItems', () => {
+  it('each completed turn replaces the previous one — nothing accumulates', () => {
     let state = run([{ type: 'START_CONVERSATION' }]);
     for (let i = 0; i < 25; i += 1) {
       state = run(
@@ -401,8 +290,18 @@ describe('history browsing', () => {
         state,
       );
     }
-    expect(state.history).toHaveLength(20);
-    expect(state.history[0]?.id).toBe('t5');
+    expect(state.latestTurn?.id).toBe('t24');
+    expect('history' in state).toBe(false);
+  });
+
+  it('the machine exposes no history browsing state', () => {
+    const state = run([
+      { type: 'START_CONVERSATION' },
+      { type: 'UTTERANCE_COMPLETED', requestId: 'r1' },
+      { type: 'PROCESSING_SUCCEEDED', requestId: 'r1', turn: makeTurn() },
+    ]);
+    expect('historyIndex' in state).toBe(false);
+    expect('browsingReturnStatus' in state).toBe(false);
   });
 });
 
@@ -436,7 +335,7 @@ describe('offline behaviour', () => {
     expect(state.status).toBe('SETUP');
   });
 
-  it('preserves history across offline periods', () => {
+  it('preserves the latest turn across offline periods', () => {
     const state = run([
       { type: 'START_CONVERSATION' },
       { type: 'UTTERANCE_COMPLETED', requestId: 'r1' },
@@ -444,7 +343,7 @@ describe('offline behaviour', () => {
       { type: 'NETWORK_OFFLINE' },
       { type: 'NETWORK_ONLINE' },
     ]);
-    expect(state.history).toHaveLength(1);
+    expect(state.latestTurn).toEqual(makeTurn());
   });
 });
 
@@ -705,7 +604,6 @@ describe('final-only pipeline invariants', () => {
       LISTENING_TO_ME: true,
       PROCESSING_ME: false,
       READ_ALOUD_PAUSED: false,
-      BROWSING_HISTORY: false,
       OFFLINE: false,
       ERROR: false,
       EXITING: false,
@@ -726,8 +624,6 @@ describe('final-only pipeline invariants', () => {
     step({ type: 'SPEECH_STARTED' });
     step({ type: 'UTTERANCE_COMPLETED', requestId: 'r1' }); // PROCESSING_THEM
     step({ type: 'PROCESSING_SUCCEEDED', requestId: 'r1', turn: makeTurn() }); // SHOWING_THEM_RESULT
-    step({ type: 'HISTORY_PREVIOUS' }); // BROWSING_HISTORY
-    step({ type: 'TOGGLE_DIRECTION' }); // back to SHOWING_THEM_RESULT
     step({ type: 'TOGGLE_DIRECTION' }); // LISTENING_TO_ME
     step({ type: 'UTTERANCE_COMPLETED', requestId: 'r2' }); // PROCESSING_ME
     step({
@@ -761,7 +657,7 @@ describe('exit and end', () => {
     expect(effects).toHaveLength(0);
   });
 
-  it('END_CONVERSATION returns to SETUP and keeps history', () => {
+  it('END_CONVERSATION returns to SETUP and drops the last turn — nothing survives a session', () => {
     const state = run([
       { type: 'START_CONVERSATION' },
       { type: 'UTTERANCE_COMPLETED', requestId: 'r1' },
@@ -770,6 +666,6 @@ describe('exit and end', () => {
     ]);
     expect(state.status).toBe('SETUP');
     expect(state.conversationActive).toBe(false);
-    expect(state.history).toHaveLength(1);
+    expect(state.latestTurn).toBeNull();
   });
 });

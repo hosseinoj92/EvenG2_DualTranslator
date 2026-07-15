@@ -29,7 +29,8 @@ audio (completed utterance)
 - A completed result **stays on the glasses indefinitely** — there is no
   automatic timeout back to listening. Pressing R1 is the only normal way to
   move on; it switches the speaking direction.
-- **History** shows both texts for every completed turn.
+- **No history** — only the latest turn is kept, so the app stays fast in
+  long conversations and nothing said is retained afterwards.
 
 Default pair: you speak **English**, the other person speaks **Spanish**.
 Both languages are selectable from the phone companion UI (English, Spanish,
@@ -45,7 +46,7 @@ German, French, Italian, Portuguese, Dutch, Turkish).
 | Backend     | Cloudflare Worker with Workers AI (`whisper-large-v3-turbo` for speech-to-text, `m2m100-1.2b` for translation) |
 | Audio       | G2 mic, PCM s16le @ 16 kHz mono, local RMS voice-activity detection, WAV upload of completed utterances only   |
 | Display     | 576 × 288 panel, three text containers (header / body / footer)                                                |
-| Controls    | R1 ring / touchpad single click (switch speaker), double click (exit), swipe up/down (history), phone buttons  |
+| Controls    | R1 ring / touchpad single click (switch speaker), double click (exit), phone buttons                          |
 
 ## 2. Conversation workflow
 
@@ -102,22 +103,12 @@ turn.
 └ R1: cancel      └ Please wait        └                      └ R1: listen to them
 ```
 
-History browsing (swipe up = older, swipe down = newer, swipe down at the
-newest returns to live) always shows both texts, labelled with the speaker and
-using the languages stored in each turn:
+Only the latest completed turn is kept — there is no conversation history,
+no browsing, and nothing is accumulated while the app runs. Each new turn
+replaces the previous one, which keeps long conversations as fast as the
+first sentence.
 
-```text
-┌ HISTORY · 3 / 8 · THEM        ┌ HISTORY · 4 / 8 · YOU
-│                               │
-│ ¿Dónde está la estación?      │ Where is the station?
-│                               │
-│ → Where is the station?       │ → ¿Dónde está la estación?
-│                               │
-└ Swipe: browse · R1: live      └ Swipe: browse · R1: live
-```
-
-Additional states: `SETUP`, `PROCESSING_THEM`, `PROCESSING_ME`,
-`BROWSING_HISTORY` (swipe through the last 20 turns), `OFFLINE`, `ERROR`
+Additional states: `SETUP`, `PROCESSING_THEM`, `PROCESSING_ME`, `OFFLINE`, `ERROR`
 (with retry — after a translation failure the recognized transcript is
 preserved and retry re-runs only the translation), `EXITING`. The reducer is
 pure and exhaustively unit-tested
@@ -129,8 +120,8 @@ pure and exhaustively unit-tested
 ┌───────────────  Even App WebView (phone)  ───────────────┐
 │  companion UI        conversation controller             │
 │  (status, languages, ┌──────────────────────────┐        │
-│   history, manual    │ pure state machine       │        │
-│   input, diagnostics)│ (reducer + effects)      │        │
+│   manual input,      │ pure state machine       │        │
+│   diagnostics)       │ (reducer + effects)      │        │
 │                      └────────────┬─────────────┘        │
 │   audio pipeline                  │        display       │
 │   VAD → WAV encoder               │        render queue  │
@@ -170,13 +161,13 @@ turntranslate-g2/
 │   ├── src/
 │   │   ├── main.ts            # bootstrap + cleanup wiring
 │   │   ├── config.ts          # ALL tunable values (VAD, geometry, timeouts)
-│   │   ├── conversation/      # state machine, controller, history helpers
+│   │   ├── conversation/      # state machine + controller
 │   │   ├── even/              # bridge, event router, render queue, display
 │   │   ├── audio/             # PCM buffers, VAD, WAV encoder, mic control
 │   │   ├── api/               # typed Worker client + error mapping
 │   │   ├── ui/                # companion phone UI (textContent only)
 │   │   └── utils/             # debounce, text hygiene, abortable fetch, …
-│   └── test/                  # 184 unit tests
+│   └── test/                  # 168 unit tests
 ├── workers/translator-api/    # Cloudflare Worker
 │   ├── wrangler.toml          # AI binding + CORS vars (no secrets)
 │   ├── src/
@@ -314,9 +305,9 @@ in `app.json` first if `com.hosseinostovar.turntranslate` is taken
 - Completed utterances (WAV) are sent to **your** Cloudflare Worker and from
   there to Cloudflare Workers AI **for processing only**; audio is held in
   memory for the duration of the request and never persisted or logged.
-- Transcripts and translations are not stored server-side; conversation
-  history lives only in the phone's memory (max 20 turns) and disappears when
-  the app closes.
+- Transcripts and translations are not stored anywhere: only the latest
+  completed turn is held in the phone's memory, each new turn replaces it,
+  and it is dropped when the conversation ends.
 - Only the selected language pair is persisted (app-scoped storage).
 - No analytics, no third-party requests, no credentials in the frontend.
 - Structured technical logging happens only in development builds.
@@ -380,10 +371,10 @@ in `app.json` first if `com.hosseinostovar.turntranslate` is taken
   default: `eventSource` shares protobuf's zero-value omission, so "no
   metadata" and "dummy source" are indistinguishable and older firmware may
   omit the field. The default accepts any click and logs the classified source.
-- History browsing shows one turn per screen; very long turns are truncated
-  with a pixel-accurate ellipsis rather than paginated.
-- Offline mode preserves settings/history but does not queue utterances for
-  later — deliberate, to avoid translating stale context.
+- Very long turns are truncated with a pixel-accurate ellipsis rather than
+  paginated.
+- Offline mode preserves settings but does not queue utterances for later —
+  deliberate, to avoid translating stale context.
 
 ## Scripts reference
 

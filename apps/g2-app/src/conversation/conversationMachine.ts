@@ -19,12 +19,14 @@
  *     abandons the utterance (new utterance, toggle, end, offline, exit);
  *   - a completed result (SHOWING_THEM_RESULT / READ_ALOUD_PAUSED) stays on
  *     screen indefinitely — no timer-based transition exists; only an explicit
- *     R1 toggle, history browsing, or a global event leaves those states.
+ *     R1 toggle or a global event leaves those states;
+ *   - only the latest completed turn is kept. There is no conversation
+ *     history: nothing is accumulated, persisted or browsable, and each new
+ *     turn replaces the previous one.
  */
 
 import type { ConversationDirection } from '@turntranslate/shared';
 import type { ConversationTurn } from '../types';
-import { appendTurn, nextIndex, previousIndex, startBrowsingIndex } from './historyStore';
 
 export type ConversationStatus =
   | 'SETUP'
@@ -34,7 +36,6 @@ export type ConversationStatus =
   | 'LISTENING_TO_ME'
   | 'PROCESSING_ME'
   | 'READ_ALOUD_PAUSED'
-  | 'BROWSING_HISTORY'
   | 'OFFLINE'
   | 'ERROR'
   | 'EXITING';
@@ -76,8 +77,6 @@ export type ConversationEvent =
   | { type: 'PROCESSING_SUCCEEDED'; requestId: string; turn: ConversationTurn }
   | { type: 'PROCESSING_FAILED'; requestId: string; error: MachineErrorInfo }
   | { type: 'RETRY'; requestId: string }
-  | { type: 'HISTORY_PREVIOUS' }
-  | { type: 'HISTORY_NEXT' }
   | { type: 'NETWORK_OFFLINE' }
   | { type: 'NETWORK_ONLINE' }
   | { type: 'MIC_FAILED'; error: MachineErrorInfo }
@@ -107,17 +106,13 @@ export interface MachineState {
    * completes or the utterance is abandoned.
    */
   currentTranscript: string | null;
-  history: ConversationTurn[];
-  /** Index into history while BROWSING_HISTORY; null otherwise. */
-  historyIndex: number | null;
-  /** Where to return when browsing ends. */
-  browsingReturnStatus: ConversationStatus | null;
+  /**
+   * The single most recent completed turn — all the result screens ever need.
+   * Replaced on every completed turn, cleared when the conversation ends.
+   */
+  latestTurn: ConversationTurn | null;
   speechActive: boolean;
   lastError: MachineErrorInfo | null;
-}
-
-export interface MachineConfig {
-  maxHistoryItems: number;
 }
 
 export interface TransitionResult {
@@ -134,9 +129,7 @@ export function initialMachineState(online: boolean): MachineState {
     activeRequestId: null,
     processingPhase: 'idle',
     currentTranscript: null,
-    history: [],
-    historyIndex: null,
-    browsingReturnStatus: null,
+    latestTurn: null,
     speechActive: false,
     lastError: null,
   };
@@ -154,9 +147,8 @@ const processingStatusFor = (direction: ConversationDirection): ConversationStat
 export function conversationReducer(
   state: MachineState,
   event: ConversationEvent,
-  config: MachineConfig,
 ): TransitionResult {
-  const result = reduce(state, event, config);
+  const result = reduce(state, event);
   return withMicEffect(state, result);
 }
 
@@ -173,11 +165,7 @@ function withMicEffect(previous: MachineState, result: TransitionResult): Transi
   return { state: result.state, effects: [...result.effects, { type: 'SET_MIC', open: after }] };
 }
 
-function reduce(
-  state: MachineState,
-  event: ConversationEvent,
-  config: MachineConfig,
-): TransitionResult {
+function reduce(state: MachineState, event: ConversationEvent): TransitionResult {
   if (state.status === 'EXITING') {
     return { state, effects: [] };
   }
@@ -192,8 +180,7 @@ function reduce(
           activeRequestId: null,
           processingPhase: 'idle',
           currentTranscript: null,
-          historyIndex: null,
-          browsingReturnStatus: null,
+          latestTurn: null,
           speechActive: false,
         },
         effects: [
@@ -215,8 +202,6 @@ function reduce(
           activeRequestId: null,
           processingPhase: 'idle',
           currentTranscript: null,
-          historyIndex: null,
-          browsingReturnStatus: null,
           speechActive: false,
         },
         effects: [
@@ -240,8 +225,11 @@ function reduce(
 
     case 'END_CONVERSATION':
       if (state.status === 'OFFLINE') {
-        // Stay offline; just drop the active conversation.
-        return { state: { ...state, conversationActive: false }, effects: [] };
+        // Stay offline; just drop the active conversation and its last turn.
+        return {
+          state: { ...state, conversationActive: false, latestTurn: null },
+          effects: [],
+        };
       }
       return {
         state: {
@@ -251,8 +239,7 @@ function reduce(
           activeRequestId: null,
           processingPhase: 'idle',
           currentTranscript: null,
-          historyIndex: null,
-          browsingReturnStatus: null,
+          latestTurn: null,
           speechActive: false,
           lastError: null,
         },
@@ -269,8 +256,6 @@ function reduce(
           activeRequestId: null,
           processingPhase: 'idle',
           currentTranscript: null,
-          historyIndex: null,
-          browsingReturnStatus: null,
           speechActive: false,
           lastError: event.error,
         },
@@ -292,13 +277,11 @@ function reduce(
       return reduceListening(state, event);
     case 'PROCESSING_THEM':
     case 'PROCESSING_ME':
-      return reduceProcessing(state, event, config);
+      return reduceProcessing(state, event);
     case 'SHOWING_THEM_RESULT':
       return reduceShowingResult(state, event);
     case 'READ_ALOUD_PAUSED':
       return reduceReadAloud(state, event);
-    case 'BROWSING_HISTORY':
-      return reduceBrowsing(state, event);
     case 'OFFLINE':
       return { state, effects: [] };
     case 'ERROR':
@@ -320,8 +303,6 @@ function reduceSetup(state: MachineState, event: ConversationEvent): TransitionR
         },
         effects: [{ type: 'RESET_VAD' }],
       };
-    case 'HISTORY_PREVIOUS':
-      return enterBrowsing(state);
     default:
       return { state, effects: [] };
   }
@@ -352,19 +333,12 @@ function reduceListening(state: MachineState, event: ConversationEvent): Transit
     case 'TOGGLE_DIRECTION':
       return toggleFromLive(state);
 
-    case 'HISTORY_PREVIOUS':
-      return enterBrowsing(state);
-
     default:
       return { state, effects: [] };
   }
 }
 
-function reduceProcessing(
-  state: MachineState,
-  event: ConversationEvent,
-  config: MachineConfig,
-): TransitionResult {
+function reduceProcessing(state: MachineState, event: ConversationEvent): TransitionResult {
   switch (event.type) {
     case 'TRANSCRIPTION_SUCCEEDED': {
       if (event.requestId !== state.activeRequestId) {
@@ -388,12 +362,11 @@ function reduceProcessing(
       }
       // Both completed-result states are terminal until an explicit user
       // action: no timer resumes listening and the mic stays closed.
-      const history = appendTurn(state.history, event.turn, config.maxHistoryItems);
       return {
         state: {
           ...state,
           status: state.status === 'PROCESSING_ME' ? 'READ_ALOUD_PAUSED' : 'SHOWING_THEM_RESULT',
-          history,
+          latestTurn: event.turn,
           activeRequestId: null,
           processingPhase: 'idle',
           currentTranscript: null,
@@ -435,16 +408,12 @@ function reduceProcessing(
 
 /**
  * A completed incoming result stays on the glasses indefinitely. The only
- * normal exit is R1 (toggle → LISTENING_TO_ME); browsing history is allowed
- * and returns here.
+ * normal exit is R1 (toggle → LISTENING_TO_ME).
  */
 function reduceShowingResult(state: MachineState, event: ConversationEvent): TransitionResult {
   switch (event.type) {
     case 'TOGGLE_DIRECTION':
       return toggleFromLive(state);
-
-    case 'HISTORY_PREVIOUS':
-      return enterBrowsing(state);
 
     default:
       return { state, effects: [] };
@@ -464,33 +433,6 @@ function reduceReadAloud(state: MachineState, event: ConversationEvent): Transit
         },
         effects: [{ type: 'RESET_VAD' }],
       };
-
-    case 'HISTORY_PREVIOUS':
-      return enterBrowsing(state);
-
-    default:
-      return { state, effects: [] };
-  }
-}
-
-function reduceBrowsing(state: MachineState, event: ConversationEvent): TransitionResult {
-  const index = state.historyIndex;
-  switch (event.type) {
-    case 'HISTORY_PREVIOUS':
-      if (index === null) return { state, effects: [] };
-      return { state: { ...state, historyIndex: previousIndex(index) }, effects: [] };
-
-    case 'HISTORY_NEXT': {
-      if (index === null) return { state, effects: [] };
-      const next = nextIndex(index, state.history.length);
-      if (next !== null) {
-        return { state: { ...state, historyIndex: next }, effects: [] };
-      }
-      return exitBrowsing(state); // Past the newest item → back to live.
-    }
-
-    case 'TOGGLE_DIRECTION':
-      return exitBrowsing(state);
 
     default:
       return { state, effects: [] };
@@ -552,9 +494,6 @@ function reduceError(state: MachineState, event: ConversationEvent): TransitionR
         effects: [{ type: 'RESET_VAD' }],
       };
 
-    case 'HISTORY_PREVIOUS':
-      return enterBrowsing(state);
-
     default:
       return { state, effects: [] };
   }
@@ -583,8 +522,6 @@ function handleManualInput(
       // Manual input skips transcription: the typed text is the transcript.
       processingPhase: 'translating',
       currentTranscript: event.text,
-      historyIndex: null,
-      browsingReturnStatus: null,
       speechActive: false,
       lastError: null,
     },
@@ -608,38 +545,6 @@ function toggleFromLive(state: MachineState): TransitionResult {
       currentTranscript: null,
       speechActive: false,
       lastError: null,
-    },
-    effects: [{ type: 'RESET_VAD' }],
-  };
-}
-
-function enterBrowsing(state: MachineState): TransitionResult {
-  const index = startBrowsingIndex(state.history);
-  if (index === null) {
-    return { state, effects: [] }; // Nothing to browse.
-  }
-  // Completed-result states are stable (no timers), so browsing can always
-  // return to exactly the state it started from.
-  return {
-    state: {
-      ...state,
-      status: 'BROWSING_HISTORY',
-      historyIndex: index,
-      browsingReturnStatus: state.status,
-      speechActive: false,
-    },
-    effects: [{ type: 'RESET_VAD' }],
-  };
-}
-
-function exitBrowsing(state: MachineState): TransitionResult {
-  const returnStatus = state.browsingReturnStatus ?? 'SETUP';
-  return {
-    state: {
-      ...state,
-      status: returnStatus,
-      historyIndex: null,
-      browsingReturnStatus: null,
     },
     effects: [{ type: 'RESET_VAD' }],
   };

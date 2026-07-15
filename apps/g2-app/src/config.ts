@@ -77,8 +77,13 @@ export const appConfig = {
   conversation: {
     /** Ignore direction-toggle clicks arriving faster than this. */
     toggleDebounceMs: 400,
-    /** In-memory conversation history cap. */
-    maxHistoryItems: 20,
+    /**
+     * Minimum interval between UI updates that carry only a new VAD RMS
+     * reading. VAD frames arrive every 20 ms; re-rendering both surfaces at
+     * that rate is wasted work, so RMS-only updates are throttled while
+     * state changes still propagate immediately.
+     */
+    vadDebugThrottleMs: 250,
   },
 
   bridge: {

@@ -35,10 +35,7 @@ function makeSnapshot(overrides: Partial<AppSnapshot> = {}): AppSnapshot {
     speechActive: false,
     processingPhase: 'idle',
     currentTranscript: null,
-    history: [],
-    historyIndex: null,
     latestTurn: null,
-    browsingTurn: null,
     error: null,
     vad: { rms: 0, speaking: false, state: 'idle' },
     lastLatencyMs: null,
@@ -127,7 +124,7 @@ describe('two-stage result panel', () => {
 
   it('shows both texts once the turn completes', () => {
     const turn = makeTurn();
-    ui.update(makeSnapshot({ status: 'SHOWING_THEM_RESULT', latestTurn: turn, history: [turn] }));
+    ui.update(makeSnapshot({ status: 'SHOWING_THEM_RESULT', latestTurn: turn }));
     expect(sourceEl().textContent).toBe('¿Dónde está la estación?');
     expect(translationEl().textContent).toBe('Where is the station?');
   });
@@ -168,26 +165,8 @@ describe('speaker direction', () => {
 
   it('labels a completed turn with the speaker who produced it', () => {
     const turn = makeTurn({ direction: 'me-to-them', sourceLanguage: 'en', targetLanguage: 'es' });
-    ui.update(makeSnapshot({ status: 'READ_ALOUD_PAUSED', latestTurn: turn, history: [turn] }));
+    ui.update(makeSnapshot({ status: 'READ_ALOUD_PAUSED', latestTurn: turn }));
     expect(speakerEl().textContent).toBe('YOU');
-  });
-
-  it('labels history items THEM / YOU from the stored turn', () => {
-    const incoming = makeTurn({ id: 'a', direction: 'them-to-me' });
-    const outgoing = makeTurn({
-      id: 'b',
-      direction: 'me-to-them',
-      sourceLanguage: 'en',
-      targetLanguage: 'es',
-      transcript: 'Where is the station?',
-      translation: '¿Dónde está la estación?',
-    });
-    ui.update(makeSnapshot({ history: [incoming, outgoing] }));
-    const items = [...root.querySelectorAll('.tt-history li .meta')].map(
-      (node) => node.textContent ?? '',
-    );
-    expect(items[0]).toContain('YOU'); // Newest first.
-    expect(items[1]).toContain('THEM');
   });
 });
 
@@ -206,14 +185,14 @@ describe('safe text rendering', () => {
     expect((window as unknown as Record<string, unknown>).__pwned).toBeUndefined();
   });
 
-  it('renders hostile history entries as inert text', () => {
+  it('renders a hostile completed turn as inert text', () => {
     const turn = makeTurn({
       transcript: '<script>window.__pwned = true</script>',
       translation: '**not markdown** <i>not html</i>',
     });
-    ui.update(makeSnapshot({ history: [turn] }));
-    expect(root.querySelector('.tt-history script, .tt-history i')).toBeNull();
-    expect(root.querySelector('.tt-history .line.src')!.textContent).toContain('<script>');
+    ui.update(makeSnapshot({ status: 'SHOWING_THEM_RESULT', latestTurn: turn }));
+    expect(root.querySelector('.tt-transcript script, .tt-transcript i')).toBeNull();
+    expect(sourceEl().textContent).toContain('<script>');
     expect((window as unknown as Record<string, unknown>).__pwned).toBeUndefined();
   });
 });

@@ -184,7 +184,7 @@ describe('two-stage voice chain', () => {
     expect(snapshot.currentTranscript).toBe('¿Dónde está la estación?');
     expect(snapshot.processingPhase).toBe('translating');
     expect(snapshot.status).toBe('PROCESSING_THEM');
-    expect(snapshot.history).toHaveLength(0); // Not a completed turn yet.
+    expect(snapshot.latestTurn).toBeNull(); // Not a completed turn yet.
     controller.dispose();
   });
 
@@ -218,7 +218,6 @@ describe('two-stage voice chain', () => {
 
     const snapshot = controller.snapshot();
     expect(snapshot.status).toBe('SHOWING_THEM_RESULT');
-    expect(snapshot.history).toHaveLength(1);
     expect(snapshot.latestTurn).toMatchObject({
       direction: 'them-to-me',
       sourceLanguage: 'es',
@@ -392,7 +391,7 @@ describe('cancellation', () => {
     expect(controller.snapshot().currentTranscript).toBeNull();
     await flush();
     expect(controller.snapshot().status).toBe('LISTENING_TO_ME');
-    expect(controller.snapshot().history).toHaveLength(0);
+    expect(controller.snapshot().latestTurn).toBeNull();
     controller.dispose();
   });
 
@@ -473,7 +472,7 @@ describe('stale responses', () => {
     await flush();
 
     const snapshot = controller.snapshot();
-    expect(snapshot.history).toHaveLength(0); // Never became a turn.
+    expect(snapshot.latestTurn).toBeNull(); // Never became a turn.
     expect(snapshot.status).toBe('LISTENING_TO_ME');
     controller.dispose();
   });
@@ -675,7 +674,6 @@ describe('full German↔English conversation (integration)', () => {
     expect(outgoing.latestTurn?.transcript).toBe(ENGLISH_SOURCE);
     expect(outgoing.latestTurn?.translation).toBe(ENGLISH_TRANSLATION);
     expect(outgoing.micOpen).toBe(false);
-    expect(outgoing.history).toHaveLength(2);
 
     // --- R1: back to listening to them. --------------------------------------
     await new Promise((resolve) =>

@@ -29,9 +29,6 @@ export interface DisplayInput {
   currentTranscript: string | null;
   settings: LanguageSettings;
   latestTurn: ConversationTurn | null;
-  browsingTurn: ConversationTurn | null;
-  historyIndex: number | null;
-  historyLength: number;
   error: UserFacingError | null;
 }
 
@@ -41,17 +38,17 @@ export interface DisplayInput {
  * than the source half, and both are truncated independently.
  */
 export const BODY_BUDGETS = {
-  /** Source transcript in a completed (or history) two-part body. */
+  /** Source transcript in a completed two-part body. */
   source: 120,
-  /** Translation in a completed (or history) two-part body. */
+  /** Translation in a completed two-part body. */
   translation: 160,
   /** Transcript shown alone while translation is pending or failed. */
   pendingTranscript: 220,
 } as const;
 
 /**
- * Completed result (both directions) and history: the recognized sentence and
- * its translation stay together so the user can compare them. Truncated
+ * Completed result (both directions): the recognized sentence and its
+ * translation stay together so the user can compare them. Truncated
  * independently, translation gets the bigger share.
  */
 export function composeTurnBody(parts: { transcript: string; translation: string }): string {
@@ -63,14 +60,6 @@ export function composeTurnBody(parts: { transcript: string; translation: string
 /** Transcript is in, translation still running (either direction). */
 export function composeTranslationPendingBody(transcript: string): string {
   return `${toDisplayText(transcript, BODY_BUDGETS.pendingTranscript)}\n\nTranslating…`;
-}
-
-/**
- * One history entry always shows both texts — original first, translation
- * second — using the languages stored in the turn, never current settings.
- */
-export function composeHistoryBody(turn: ConversationTurn): string {
-  return composeTurnBody({ transcript: turn.transcript, translation: turn.translation });
 }
 
 export function buildDisplayModel(input: DisplayInput): DisplayModel {
@@ -145,17 +134,6 @@ export function buildDisplayModel(input: DisplayInput): DisplayModel {
           ? composeTurnBody({ transcript: turn.transcript, translation: turn.translation })
           : '',
         footer: 'R1: listen to them',
-      };
-    }
-
-    case 'BROWSING_HISTORY': {
-      const turn = input.browsingTurn;
-      const position = input.historyIndex === null ? 0 : input.historyIndex + 1;
-      const speaker = turn?.direction === 'me-to-them' ? 'YOU' : 'THEM';
-      return {
-        header: `HISTORY · ${position} / ${input.historyLength} · ${speaker}`,
-        body: turn ? composeHistoryBody(turn) : '',
-        footer: 'Swipe: browse · R1: live',
       };
     }
 

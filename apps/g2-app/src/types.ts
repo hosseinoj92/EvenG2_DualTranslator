@@ -6,7 +6,7 @@
 import type { ConversationDirection, LanguageCode } from '@turntranslate/shared';
 import type { ConversationStatus, ProcessingPhase } from './conversation/conversationMachine';
 
-/** One completed translation turn kept in local history. */
+/** One completed translation turn. Only the latest is kept — never a list. */
 export interface ConversationTurn {
   id: string;
   direction: ConversationDirection;
@@ -56,11 +56,7 @@ export interface AppSnapshot {
    * (transcription finished, translation pending or failed); null otherwise.
    */
   currentTranscript: string | null;
-  history: ConversationTurn[];
-  historyIndex: number | null;
   latestTurn: ConversationTurn | null;
-  /** The turn currently shown while browsing history; null when live. */
-  browsingTurn: ConversationTurn | null;
   error: UserFacingError | null;
   vad: VadDebugInfo;
   lastLatencyMs: number | null;

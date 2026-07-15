@@ -26,7 +26,6 @@ import { leadingDebounce, type LeadingDebounced } from '../utils/debounce';
 import { makeId } from '../utils/ids';
 import type { ConversationEffect, ConversationEvent, MachineState } from './conversationMachine';
 import { conversationReducer, initialMachineState } from './conversationMachine';
-import { latestTurn } from './historyStore';
 
 export interface ControllerDeps {
   config: AppConfig;
@@ -63,6 +62,7 @@ export class ConversationController {
   private lastFailedTranslation: FailedTranslationContext | null = null;
   private pendingManualText: string | null = null;
   private vadDebug: VadDebugInfo = { rms: 0, speaking: false, state: 'idle' };
+  private lastVadDebugEmitMs = 0;
   private lastLatencyMs: number | null = null;
   private micOpen = false;
   private disposed = false;
@@ -79,7 +79,17 @@ export class ConversationController {
         // Too-short blips are dropped silently; the app keeps listening.
       },
       onDebug: (info) => {
+        // VAD frames arrive every 20 ms. Speaking/state transitions must
+        // reach the UI immediately, but an update whose only change is a new
+        // RMS reading is throttled — re-rendering both surfaces 50×/s is
+        // wasted work that makes long sessions sluggish.
+        const previous = this.vadDebug;
         this.vadDebug = info;
+        const stateChanged = info.speaking !== previous.speaking || info.state !== previous.state;
+        const now = Date.now();
+        const throttleMs = deps.config.conversation.vadDebugThrottleMs;
+        if (!stateChanged && now - this.lastVadDebugEmitMs < throttleMs) return;
+        this.lastVadDebugEmitMs = now;
         this.emitSnapshot();
       },
     });
@@ -98,10 +108,6 @@ export class ConversationController {
   }
 
   snapshot(): AppSnapshot {
-    const browsing =
-      this.state.historyIndex !== null
-        ? (this.state.history[this.state.historyIndex] ?? null)
-        : null;
     return {
       status: this.state.status,
       direction: this.state.direction,
@@ -113,10 +119,7 @@ export class ConversationController {
       speechActive: this.state.speechActive,
       processingPhase: this.state.processingPhase,
       currentTranscript: this.state.currentTranscript,
-      history: [...this.state.history],
-      historyIndex: this.state.historyIndex,
-      latestTurn: latestTurn(this.state.history),
-      browsingTurn: browsing,
+      latestTurn: this.state.latestTurn,
       error: this.state.lastError
         ? {
             code: this.state.lastError.code,
@@ -161,14 +164,6 @@ export class ConversationController {
 
   retry(): void {
     this.dispatch({ type: 'RETRY', requestId: makeId() });
-  }
-
-  historyPrevious(): void {
-    this.dispatch({ type: 'HISTORY_PREVIOUS' });
-  }
-
-  historyNext(): void {
-    this.dispatch({ type: 'HISTORY_NEXT' });
   }
 
   submitManualText(text: string, direction: ConversationDirection): void {
@@ -239,9 +234,7 @@ export class ConversationController {
 
   private dispatch(event: ConversationEvent): void {
     if (this.disposed) return;
-    const { state, effects } = conversationReducer(this.state, event, {
-      maxHistoryItems: this.deps.config.conversation.maxHistoryItems,
-    });
+    const { state, effects } = conversationReducer(this.state, event);
     this.state = state;
     for (const effect of effects) {
       this.runEffect(effect);

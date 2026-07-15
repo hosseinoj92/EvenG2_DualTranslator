@@ -68,9 +68,6 @@ async function start(): Promise<void> {
     currentTranscript: snapshot.currentTranscript,
     settings: snapshot.settings,
     latestTurn: snapshot.latestTurn,
-    browsingTurn: snapshot.browsingTurn,
-    historyIndex: snapshot.historyIndex,
-    historyLength: snapshot.history.length,
     error: snapshot.error,
   });
 
@@ -127,8 +124,10 @@ async function start(): Promise<void> {
           // arrives if the user confirms, and cleanup happens there.
           void boundBridge.shutDownPageContainer(1);
         },
-        onSwipeUp: () => controller.historyPrevious(),
-        onSwipeDown: () => controller.historyNext(),
+        // Swipes are deliberately unbound: there is no history to browse,
+        // and no other gesture action is defined for them.
+        onSwipeUp: () => {},
+        onSwipeDown: () => {},
         onSystemExit: () => {
           controller.requestExit();
         },
