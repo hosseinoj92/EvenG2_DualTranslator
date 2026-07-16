@@ -18,7 +18,7 @@ import type { ConversationDirection } from '@turntranslate/shared';
 import { getLanguage } from '@turntranslate/shared';
 import type { ConversationStatus, ProcessingPhase } from '../conversation/conversationMachine';
 import type { ConversationTurn, DisplayModel, LanguageSettings, UserFacingError } from '../types';
-import { toDisplayText } from '../utils/text';
+import { paginateText, sanitizeBlock, toDisplayText } from '../utils/text';
 
 /** Everything the display needs to know about the current app state. */
 export interface DisplayInput {
@@ -29,32 +29,36 @@ export interface DisplayInput {
   currentTranscript: string | null;
   settings: LanguageSettings;
   latestTurn: ConversationTurn | null;
+  /** Zero-based page of the current result body (swipe to change). */
+  bodyPage: number;
   error: UserFacingError | null;
 }
 
 /**
  * Character budgets for composed bodies. The body container fits roughly 300
- * characters; the translation half deliberately gets a slightly larger budget
- * than the source half, and both are truncated independently.
+ * characters comfortably.
  */
 export const BODY_BUDGETS = {
-  /** Source transcript in a completed two-part body. */
-  source: 120,
-  /** Translation in a completed two-part body. */
-  translation: 160,
   /** Transcript shown alone while translation is pending or failed. */
   pendingTranscript: 220,
+  /**
+   * Page size for completed-result bodies. Result text is never truncated —
+   * anything longer than one page is split at word boundaries and read by
+   * swiping. Conservative so a page always fits the 204 px body box; the
+   * pixel fit in DisplayManager remains as a safety net.
+   */
+  resultPageChars: 260,
 } as const;
 
 /**
  * Completed result (both directions): the recognized sentence and its
- * translation stay together so the user can compare them. Truncated
- * independently, translation gets the bigger share.
+ * translation stay together so the user can compare them, split into
+ * swipeable pages instead of being truncated. Always at least one page.
  */
-export function composeTurnBody(parts: { transcript: string; translation: string }): string {
-  const source = toDisplayText(parts.transcript, BODY_BUDGETS.source);
-  const translation = toDisplayText(parts.translation, BODY_BUDGETS.translation);
-  return `${source}\n\n→ ${translation}`;
+export function resultBodyPages(turn: ConversationTurn): string[] {
+  const source = sanitizeBlock(turn.transcript);
+  const translation = sanitizeBlock(turn.translation);
+  return paginateText(`${source}\n\n→ ${translation}`, BODY_BUDGETS.resultPageChars);
 }
 
 /** Transcript is in, translation still running (either direction). */
@@ -94,17 +98,11 @@ export function buildDisplayModel(input: DisplayInput): DisplayModel {
       return { header: 'THEM', body: 'Processing speech…', footer: 'Please wait' };
 
     case 'SHOWING_THEM_RESULT':
-      // Stays on screen indefinitely; only R1 moves the conversation on.
-      return {
-        header: 'THEY SAID',
-        body: input.latestTurn
-          ? composeTurnBody({
-              transcript: input.latestTurn.transcript,
-              translation: input.latestTurn.translation,
-            })
-          : '',
-        footer: 'R1: your turn',
-      };
+      // Stays on screen indefinitely; R1 hands over, double-tap keeps the
+      // same speaker, swipes page through a long body.
+      return resultModel('THEY SAID', input.latestTurn, input.bodyPage, {
+        singleSpeakerHint: 'R1: your turn · 2×tap: they continue',
+      });
 
     case 'LISTENING_TO_ME':
       return {
@@ -128,13 +126,9 @@ export function buildDisplayModel(input: DisplayInput): DisplayModel {
       // sentence and the translation to read aloud — until R1 is pressed.
       const turn =
         input.latestTurn && input.latestTurn.direction === 'me-to-them' ? input.latestTurn : null;
-      return {
-        header: 'YOU SAID',
-        body: turn
-          ? composeTurnBody({ transcript: turn.transcript, translation: turn.translation })
-          : '',
-        footer: 'R1: listen to them',
-      };
+      return resultModel('YOU SAID', turn, input.bodyPage, {
+        singleSpeakerHint: 'R1: their turn · 2×tap: you continue',
+      });
     }
 
     case 'OFFLINE':
@@ -150,6 +144,34 @@ export function buildDisplayModel(input: DisplayInput): DisplayModel {
     case 'EXITING':
       return { header: 'TURNTRANSLATE', body: 'Closing…', footer: '' };
   }
+}
+
+/**
+ * Builds a completed-result screen. Long bodies are paginated: the header
+ * gains a `· page/total` indicator plus a swipe hint in the footer, and the
+ * requested page is clamped so a stale page index can never point past the
+ * end of a shorter body.
+ */
+function resultModel(
+  speakerHeader: string,
+  turn: ConversationTurn | null,
+  bodyPage: number,
+  hints: { singleSpeakerHint: string },
+): DisplayModel {
+  if (!turn) {
+    return { header: speakerHeader, body: '', footer: hints.singleSpeakerHint };
+  }
+  const pages = resultBodyPages(turn);
+  if (pages.length === 1) {
+    return { header: speakerHeader, body: pages[0] ?? '', footer: hints.singleSpeakerHint };
+  }
+  const page = Math.max(0, Math.min(bodyPage, pages.length - 1));
+  return {
+    header: `${speakerHeader} · ${page + 1}/${pages.length}`,
+    body: pages[page] ?? '',
+    // Compact so it stays on one line: swiping is the hint that matters here.
+    footer: 'Swipe: more · R1: next · 2×tap: same',
+  };
 }
 
 /** Failures where nothing usable was recognized from the audio. */

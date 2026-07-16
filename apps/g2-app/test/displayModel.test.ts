@@ -4,7 +4,7 @@ import {
   BODY_BUDGETS,
   buildDisplayModel,
   composeTranslationPendingBody,
-  composeTurnBody,
+  resultBodyPages,
 } from '../src/even/displayModel';
 import type { ConversationTurn } from '../src/types';
 
@@ -36,6 +36,7 @@ function makeInput(overrides: Partial<DisplayInput> = {}): DisplayInput {
     currentTranscript: null,
     settings: { myLanguage: 'en', otherLanguage: 'es' },
     latestTurn: null,
+    bodyPage: 0,
     error: null,
     ...overrides,
   };
@@ -78,7 +79,7 @@ describe('incoming (them-to-me) layouts', () => {
     expect(model.header).toBe('THEY SAID');
     expect(model.body).toContain('¿Dónde está la estación?');
     expect(model.body).toContain('→ Where is the station?');
-    expect(model.footer).toBe('R1: your turn');
+    expect(model.footer).toBe('R1: your turn · 2×tap: they continue');
   });
 
   it('completed layouts contain no language-code decorations', () => {
@@ -143,7 +144,7 @@ describe('outgoing (me-to-them) layouts', () => {
     const model = buildDisplayModel(makeInput({ status: 'READ_ALOUD_PAUSED', latestTurn: turn }));
     expect(model.header).toBe('YOU SAID');
     expect(model.body).toBe('Where is the station?\n\n→ ¿Dónde está la estación?');
-    expect(model.footer).toBe('R1: listen to them');
+    expect(model.footer).toBe('R1: their turn · 2×tap: you continue');
   });
 });
 
@@ -152,6 +153,7 @@ describe('final-only pipeline screens (German ↔ English reference flow)', () =
     const model = buildDisplayModel(makeInput({ status: 'LISTENING_TO_THEM' }));
     expect(model.body).toBe('Listening…');
     expect(model.footer).toBe('R1: your turn');
+    expect(model.header).toBe('THEM');
   });
 
   it('during their final transcription: only the stable processing screen', () => {
@@ -183,7 +185,7 @@ describe('final-only pipeline screens (German ↔ English reference flow)', () =
     const model = buildDisplayModel(makeInput({ status: 'SHOWING_THEM_RESULT', latestTurn: turn }));
     expect(model.header).toBe('THEY SAID');
     expect(model.body).toBe(`${GERMAN_SOURCE}\n\n→ ${GERMAN_TRANSLATION}`);
-    expect(model.footer).toBe('R1: your turn');
+    expect(model.footer).toBe('R1: your turn · 2×tap: they continue');
   });
 
   it('my completed result: English source and German translation together', () => {
@@ -197,7 +199,7 @@ describe('final-only pipeline screens (German ↔ English reference flow)', () =
     const model = buildDisplayModel(makeInput({ status: 'READ_ALOUD_PAUSED', latestTurn: turn }));
     expect(model.header).toBe('YOU SAID');
     expect(model.body).toBe(`${ENGLISH_SOURCE}\n\n→ ${ENGLISH_TRANSLATION}`);
-    expect(model.footer).toBe('R1: listen to them');
+    expect(model.footer).toBe('R1: their turn · 2×tap: you continue');
   });
 
   it('display input carries no partial-preview fields', () => {
@@ -207,50 +209,54 @@ describe('final-only pipeline screens (German ↔ English reference flow)', () =
   });
 });
 
-describe('composed bodies', () => {
-  it('composeTurnBody keeps both parts on separate lines', () => {
-    const body = composeTurnBody({
-      transcript: '¿Dónde está la estación?',
-      translation: 'Where is the station?',
-    });
-    expect(body).toBe('¿Dónde está la estación?\n\n→ Where is the station?');
+describe('result bodies and pagination', () => {
+  it('keeps both parts on separate lines in a single page', () => {
+    const pages = resultBodyPages(
+      makeTurn({
+        transcript: '¿Dónde está la estación?',
+        translation: 'Where is the station?',
+      }),
+    );
+    expect(pages).toEqual(['¿Dónde está la estación?\n\n→ Where is the station?']);
   });
 
-  it('truncates source and translation independently — a long transcript never hides the translation', () => {
+  it('never truncates: long results split into pages that cover the full text', () => {
     const longSource = 'palabra '.repeat(60).trim();
-    const body = composeTurnBody({
-      transcript: longSource,
-      translation: 'Where is the station?',
-    });
-    expect(body).toContain('→ Where is the station?');
-    const [sourcePart] = body.split('\n\n');
-    expect(sourcePart!.length).toBeLessThanOrEqual(BODY_BUDGETS.source);
-    expect(sourcePart!.endsWith('…')).toBe(true);
-  });
-
-  it('gives the translation a larger budget than the source', () => {
-    expect(BODY_BUDGETS.translation).toBeGreaterThan(BODY_BUDGETS.source);
     const longTranslation = 'word '.repeat(60).trim();
-    const body = composeTurnBody({ transcript: 'hola', translation: longTranslation });
-    const translationPart = body.split('\n\n→ ')[1]!;
-    expect(translationPart.length).toBeLessThanOrEqual(BODY_BUDGETS.translation);
-    expect(translationPart.endsWith('…')).toBe(true);
+    const pages = resultBodyPages(
+      makeTurn({ transcript: longSource, translation: longTranslation }),
+    );
+    expect(pages.length).toBeGreaterThan(1);
+    for (const page of pages) {
+      expect(page.length).toBeLessThanOrEqual(BODY_BUDGETS.resultPageChars);
+      expect(page).not.toContain('…'); // Ellipsis truncation is gone.
+    }
+    // No word may be lost or cut in half across the pagination.
+    const reassembled = pages.join(' ').replace(/\s+/g, ' ');
+    expect(reassembled).toContain('palabra palabra');
+    expect(reassembled.endsWith('word')).toBe(true);
+    expect(reassembled).toContain('→');
   });
 
   it('preserves Unicode, accents and non-English punctuation', () => {
-    const body = composeTurnBody({
-      transcript: '¿Größe? Ça va! İstanbul’a mı?',
-      translation: 'Ünïcode översätts — «правильно»',
-    });
-    expect(body).toContain('¿Größe? Ça va! İstanbul’a mı?');
-    expect(body).toContain('Ünïcode översätts — «правильно»');
+    const pages = resultBodyPages(
+      makeTurn({
+        transcript: '¿Größe? Ça va! İstanbul’a mı?',
+        translation: 'Ünïcode översätts — «правильно»',
+      }),
+    );
+    expect(pages[0]).toContain('¿Größe? Ça va! İstanbul’a mı?');
+    expect(pages[0]).toContain('Ünïcode översätts — «правильно»');
   });
 
   it('strips HTML and Markdown from both parts', () => {
-    const body = composeTurnBody({
-      transcript: '<b>hola</b> **mundo**',
-      translation: '[hello](http://x) <script>alert(1)</script> world',
-    });
+    const pages = resultBodyPages(
+      makeTurn({
+        transcript: '<b>hola</b> **mundo**',
+        translation: '[hello](http://x) <script>alert(1)</script> world',
+      }),
+    );
+    const body = pages.join('\n');
     expect(body).not.toContain('<');
     expect(body).not.toContain('**');
     expect(body).not.toContain('](');
@@ -263,6 +269,52 @@ describe('composed bodies', () => {
     expect(composeTranslationPendingBody('Where is the station?')).toBe(
       'Where is the station?\n\nTranslating…',
     );
+  });
+});
+
+describe('paged result screens', () => {
+  const longTurn = () =>
+    makeTurn({
+      transcript: 'palabra '.repeat(50).trim(),
+      translation: 'word '.repeat(50).trim(),
+    });
+
+  it('multi-page results show a page indicator and a swipe hint', () => {
+    const model = buildDisplayModel(
+      makeInput({ status: 'SHOWING_THEM_RESULT', latestTurn: longTurn(), bodyPage: 0 }),
+    );
+    expect(model.header).toMatch(/^THEY SAID · 1\/\d+$/);
+    expect(model.footer).toBe('Swipe: more · R1: next · 2×tap: same');
+    expect(model.body.startsWith('palabra')).toBe(true);
+  });
+
+  it('bodyPage selects the page; later pages reach the translation', () => {
+    const pages = resultBodyPages(longTurn());
+    const last = buildDisplayModel(
+      makeInput({
+        status: 'SHOWING_THEM_RESULT',
+        latestTurn: longTurn(),
+        bodyPage: pages.length - 1,
+      }),
+    );
+    expect(last.header).toBe(`THEY SAID · ${pages.length}/${pages.length}`);
+    expect(last.body.endsWith('word')).toBe(true);
+  });
+
+  it('clamps a stale page index past the end of the body', () => {
+    const pages = resultBodyPages(longTurn());
+    const model = buildDisplayModel(
+      makeInput({ status: 'SHOWING_THEM_RESULT', latestTurn: longTurn(), bodyPage: 99 }),
+    );
+    expect(model.header).toBe(`THEY SAID · ${pages.length}/${pages.length}`);
+  });
+
+  it('single-page results keep the plain header and tap-hint footer', () => {
+    const model = buildDisplayModel(
+      makeInput({ status: 'READ_ALOUD_PAUSED', latestTurn: makeTurn({ direction: 'me-to-them' }) }),
+    );
+    expect(model.header).toBe('YOU SAID');
+    expect(model.footer).toBe('R1: their turn · 2×tap: you continue');
   });
 });
 

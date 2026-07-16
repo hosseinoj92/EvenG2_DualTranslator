@@ -68,6 +68,7 @@ async function start(): Promise<void> {
     currentTranscript: snapshot.currentTranscript,
     settings: snapshot.settings,
     latestTurn: snapshot.latestTurn,
+    bodyPage: snapshot.bodyPage,
     error: snapshot.error,
   });
 
@@ -90,6 +91,7 @@ async function start(): Promise<void> {
     onStartConversation: () => controller.startConversation(),
     onEndConversation: () => controller.endConversation(),
     onToggleDirection: () => controller.toggleDirection(),
+    onSpeakAgain: () => controller.speakAgain(),
     onSwapLanguages: () => controller.swapLanguages(),
     onSelectMyLanguage: (code) => {
       if (isSupportedLanguageCode(code)) {
@@ -120,14 +122,16 @@ async function start(): Promise<void> {
       {
         onClick: () => controller.handleGlassesClick(),
         onDoubleClick: () => {
-          // Exit mode 1: the OS shows its confirmation layer; SYSTEM_EXIT_EVENT
-          // arrives if the user confirms, and cleanup happens there.
+          // On a completed result, double-tap means "same speaker again".
+          if (controller.handleGlassesDoubleClick()) return;
+          // Everywhere else it exits. Exit mode 1: the OS shows its
+          // confirmation layer; SYSTEM_EXIT_EVENT arrives if the user
+          // confirms, and cleanup happens there.
           void boundBridge.shutDownPageContainer(1);
         },
-        // Swipes are deliberately unbound: there is no history to browse,
-        // and no other gesture action is defined for them.
-        onSwipeUp: () => {},
-        onSwipeDown: () => {},
+        // Swipes page through a long result body (current message only).
+        onSwipeUp: () => controller.resultScrollPrevious(),
+        onSwipeDown: () => controller.resultScrollNext(),
         onSystemExit: () => {
           controller.requestExit();
         },

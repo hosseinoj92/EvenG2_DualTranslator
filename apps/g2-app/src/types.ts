@@ -57,6 +57,8 @@ export interface AppSnapshot {
    */
   currentTranscript: string | null;
   latestTurn: ConversationTurn | null;
+  /** Zero-based page of the current result body on the glasses. */
+  bodyPage: number;
   error: UserFacingError | null;
   vad: VadDebugInfo;
   lastLatencyMs: number | null;

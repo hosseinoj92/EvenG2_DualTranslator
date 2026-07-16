@@ -137,6 +137,59 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+describe('glasses double-tap and result paging', () => {
+  async function reachResult(client: MockClient, controller: ConversationController) {
+    controller.startConversation();
+    speak(controller);
+    client.resolveTranscription(0, 'palabra '.repeat(50).trim());
+    await flush();
+    client.resolveTranslation(0, 'word '.repeat(50).trim());
+    await flush();
+    expect(controller.snapshot().status).toBe('SHOWING_THEM_RESULT');
+  }
+
+  it('double-tap on a result re-listens to the same speaker and is consumed', async () => {
+    const client = new MockClient();
+    const controller = makeController(client);
+    await reachResult(client, controller);
+
+    expect(controller.handleGlassesDoubleClick()).toBe(true);
+    expect(controller.snapshot().status).toBe('LISTENING_TO_THEM');
+    expect(controller.snapshot().direction).toBe('them-to-me');
+    controller.dispose();
+  });
+
+  it('double-tap outside a result is NOT consumed (falls through to exit)', () => {
+    const client = new MockClient();
+    const controller = makeController(client);
+    expect(controller.handleGlassesDoubleClick()).toBe(false); // SETUP
+
+    controller.startConversation();
+    expect(controller.handleGlassesDoubleClick()).toBe(false); // LISTENING
+    controller.dispose();
+  });
+
+  it('swipes page through a long result and clamp at both ends', async () => {
+    const client = new MockClient();
+    const controller = makeController(client);
+    await reachResult(client, controller);
+    expect(controller.snapshot().bodyPage).toBe(0);
+
+    controller.resultScrollNext();
+    expect(controller.snapshot().bodyPage).toBe(1);
+
+    for (let i = 0; i < 20; i += 1) controller.resultScrollNext();
+    const lastPage = controller.snapshot().bodyPage;
+    expect(lastPage).toBeGreaterThan(0);
+    controller.resultScrollNext();
+    expect(controller.snapshot().bodyPage).toBe(lastPage); // Clamped at the end.
+
+    for (let i = 0; i < 30; i += 1) controller.resultScrollPrevious();
+    expect(controller.snapshot().bodyPage).toBe(0);
+    controller.dispose();
+  });
+});
+
 describe('two-stage voice chain', () => {
   it('calls transcription first and does not translate until it succeeds', async () => {
     const client = new MockClient();

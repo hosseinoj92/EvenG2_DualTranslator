@@ -19,7 +19,11 @@
  *     abandons the utterance (new utterance, toggle, end, offline, exit);
  *   - a completed result (SHOWING_THEM_RESULT / READ_ALOUD_PAUSED) stays on
  *     screen indefinitely — no timer-based transition exists; only an explicit
- *     R1 toggle or a global event leaves those states;
+ *     user action (R1 toggle to the other speaker, double-tap SPEAK_AGAIN for
+ *     the same speaker) or a global event leaves those states;
+ *   - long result bodies are paginated on the glasses: `bodyPage` tracks the
+ *     visible page of the CURRENT result only and resets to 0 whenever the
+ *     result changes or the result screen is left;
  *   - only the latest completed turn is kept. There is no conversation
  *     history: nothing is accumulated, persisted or browsable, and each new
  *     turn replaces the previous one.
@@ -65,6 +69,11 @@ export type ConversationEvent =
   | { type: 'START_CONVERSATION' }
   | { type: 'END_CONVERSATION' }
   | { type: 'TOGGLE_DIRECTION' }
+  /** Double-tap on a result: the same speaker talks again, direction kept. */
+  | { type: 'SPEAK_AGAIN' }
+  /** Swipe on a result: next body page. `pageCount` clamps the upper bound. */
+  | { type: 'BODY_SCROLL_NEXT'; pageCount: number }
+  | { type: 'BODY_SCROLL_PREVIOUS' }
   | { type: 'SPEECH_STARTED' }
   | { type: 'UTTERANCE_COMPLETED'; requestId: string }
   | {
@@ -111,6 +120,11 @@ export interface MachineState {
    * Replaced on every completed turn, cleared when the conversation ends.
    */
   latestTurn: ConversationTurn | null;
+  /**
+   * Zero-based page of the current result body shown on the glasses. Only
+   * meaningful in the two result states; reset whenever the result changes.
+   */
+  bodyPage: number;
   speechActive: boolean;
   lastError: MachineErrorInfo | null;
 }
@@ -130,6 +144,7 @@ export function initialMachineState(online: boolean): MachineState {
     processingPhase: 'idle',
     currentTranscript: null,
     latestTurn: null,
+    bodyPage: 0,
     speechActive: false,
     lastError: null,
   };
@@ -181,6 +196,7 @@ function reduce(state: MachineState, event: ConversationEvent): TransitionResult
           processingPhase: 'idle',
           currentTranscript: null,
           latestTurn: null,
+          bodyPage: 0,
           speechActive: false,
         },
         effects: [
@@ -240,6 +256,7 @@ function reduce(state: MachineState, event: ConversationEvent): TransitionResult
           processingPhase: 'idle',
           currentTranscript: null,
           latestTurn: null,
+          bodyPage: 0,
           speechActive: false,
           lastError: null,
         },
@@ -367,6 +384,7 @@ function reduceProcessing(state: MachineState, event: ConversationEvent): Transi
           ...state,
           status: state.status === 'PROCESSING_ME' ? 'READ_ALOUD_PAUSED' : 'SHOWING_THEM_RESULT',
           latestTurn: event.turn,
+          bodyPage: 0,
           activeRequestId: null,
           processingPhase: 'idle',
           currentTranscript: null,
@@ -407,10 +425,46 @@ function reduceProcessing(state: MachineState, event: ConversationEvent): Transi
 }
 
 /**
- * A completed incoming result stays on the glasses indefinitely. The only
- * normal exit is R1 (toggle → LISTENING_TO_ME).
+ * Events shared by both completed-result states: double-tap re-listens to the
+ * SAME speaker (direction preserved), swipes page through the current result
+ * body. Returns null for events the specific state must handle itself.
+ */
+function reduceResultCommon(state: MachineState, event: ConversationEvent): TransitionResult | null {
+  switch (event.type) {
+    case 'SPEAK_AGAIN':
+      return {
+        state: {
+          ...state,
+          status: state.conversationActive ? listeningStatusFor(state.direction) : 'SETUP',
+          bodyPage: 0,
+          speechActive: false,
+          lastError: null,
+        },
+        effects: [{ type: 'RESET_VAD' }],
+      };
+
+    case 'BODY_SCROLL_NEXT':
+      return {
+        state: { ...state, bodyPage: Math.min(state.bodyPage + 1, Math.max(0, event.pageCount - 1)) },
+        effects: [],
+      };
+
+    case 'BODY_SCROLL_PREVIOUS':
+      return { state: { ...state, bodyPage: Math.max(0, state.bodyPage - 1) }, effects: [] };
+
+    default:
+      return null;
+  }
+}
+
+/**
+ * A completed incoming result stays on the glasses indefinitely. The normal
+ * exits are R1 (toggle → LISTENING_TO_ME) and double-tap (they speak again).
  */
 function reduceShowingResult(state: MachineState, event: ConversationEvent): TransitionResult {
+  const common = reduceResultCommon(state, event);
+  if (common) return common;
+
   switch (event.type) {
     case 'TOGGLE_DIRECTION':
       return toggleFromLive(state);
@@ -421,6 +475,9 @@ function reduceShowingResult(state: MachineState, event: ConversationEvent): Tra
 }
 
 function reduceReadAloud(state: MachineState, event: ConversationEvent): TransitionResult {
+  const common = reduceResultCommon(state, event);
+  if (common) return common;
+
   switch (event.type) {
     case 'TOGGLE_DIRECTION':
       // Done reading aloud → go back to listening to them.
@@ -429,6 +486,7 @@ function reduceReadAloud(state: MachineState, event: ConversationEvent): Transit
           ...state,
           status: state.conversationActive ? 'LISTENING_TO_THEM' : 'SETUP',
           direction: 'them-to-me',
+          bodyPage: 0,
           lastError: null,
         },
         effects: [{ type: 'RESET_VAD' }],
@@ -522,6 +580,7 @@ function handleManualInput(
       // Manual input skips transcription: the typed text is the transcript.
       processingPhase: 'translating',
       currentTranscript: event.text,
+      bodyPage: 0,
       speechActive: false,
       lastError: null,
     },
@@ -543,6 +602,7 @@ function toggleFromLive(state: MachineState): TransitionResult {
       direction: next,
       processingPhase: 'idle',
       currentTranscript: null,
+      bodyPage: 0,
       speechActive: false,
       lastError: null,
     },

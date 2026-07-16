@@ -52,6 +52,11 @@ export function toDisplayText(text: string, maxChars: number): string {
  * to a single blank line.
  */
 export function toDisplayBlock(text: string, maxChars: number): string {
+  return truncateWithEllipsis(sanitizeBlock(text), maxChars);
+}
+
+/** `toDisplayBlock` without the length cap, for content that gets paginated. */
+export function sanitizeBlock(text: string): string {
   const lines = stripMarkup(text)
     .split('\n')
     .map((line) => normalizeWhitespace(line));
@@ -62,5 +67,31 @@ export function toDisplayBlock(text: string, maxChars: number): string {
   }
   while (collapsed[0] === '') collapsed.shift();
   while (collapsed[collapsed.length - 1] === '') collapsed.pop();
-  return truncateWithEllipsis(collapsed.join('\n'), maxChars);
+  return collapsed.join('\n');
+}
+
+/**
+ * Splits text into pages of at most `pageChars` characters, cutting at word
+ * boundaries (space or line break) whenever one exists in the second half of
+ * the page. Never drops content: concatenating the pages (modulo collapsed
+ * boundary whitespace) reproduces the input. Always returns at least one page.
+ */
+export function paginateText(text: string, pageChars: number): string[] {
+  const clean = text.trim();
+  if (clean.length === 0 || pageChars <= 1 || clean.length <= pageChars) {
+    return [clean];
+  }
+  const pages: string[] = [];
+  let rest = clean;
+  while (rest.length > pageChars) {
+    const hardCut = rest.slice(0, pageChars);
+    const lastBreak = Math.max(hardCut.lastIndexOf(' '), hardCut.lastIndexOf('\n'));
+    // Respect the word boundary unless it sacrifices most of the page
+    // (a single overlong word is cut mid-word instead).
+    const cutAt = lastBreak > pageChars * 0.5 ? lastBreak : pageChars;
+    pages.push(rest.slice(0, cutAt).trimEnd());
+    rest = rest.slice(cutAt).trimStart();
+  }
+  if (rest.length > 0) pages.push(rest);
+  return pages;
 }

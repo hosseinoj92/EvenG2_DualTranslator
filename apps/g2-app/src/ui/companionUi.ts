@@ -13,6 +13,7 @@ export interface CompanionUiCallbacks {
   onStartConversation(): void;
   onEndConversation(): void;
   onToggleDirection(): void;
+  onSpeakAgain(): void;
   onSwapLanguages(): void;
   onSelectMyLanguage(code: string): void;
   onSelectOtherLanguage(code: string): void;
@@ -47,8 +48,13 @@ export function mountCompanionUi(root: HTMLElement, callbacks: CompanionUiCallba
   const stateLine = el('div', 'tt-error');
   stateLine.setAttribute('role', 'status');
 
-  const toggleButton = button('Switch speaker', 'primary big');
+  const turnRow = el('div', 'tt-row');
+  const toggleButton = button('Switch speaker', 'primary grow');
   toggleButton.addEventListener('click', () => callbacks.onToggleDirection());
+  // Mirrors the glasses double-tap: the same speaker adds another sentence.
+  const speakAgainButton = button('Same speaker again', 'grow');
+  speakAgainButton.addEventListener('click', () => callbacks.onSpeakAgain());
+  turnRow.append(toggleButton, speakAgainButton);
 
   const startEndRow = el('div', 'tt-row');
   const startButton = button('Start conversation', 'primary grow');
@@ -59,7 +65,7 @@ export function mountCompanionUi(root: HTMLElement, callbacks: CompanionUiCallba
   retryButton.addEventListener('click', () => callbacks.onRetry());
   startEndRow.append(startButton, endButton, retryButton);
 
-  convPanel.append(directionLine, toggleButton, startEndRow, stateLine);
+  convPanel.append(directionLine, turnRow, startEndRow, stateLine);
 
   // ----- languages panel ----------------------------------------------------
   const langPanel = el('section', 'tt-panel');
@@ -145,6 +151,8 @@ export function mountCompanionUi(root: HTMLElement, callbacks: CompanionUiCallba
       !snapshot.conversationActive ||
       snapshot.status === 'OFFLINE' ||
       snapshot.status === 'EXITING';
+    speakAgainButton.disabled =
+      snapshot.status !== 'SHOWING_THEM_RESULT' && snapshot.status !== 'READ_ALOUD_PAUSED';
     retryButton.disabled = !(snapshot.status === 'ERROR' && (snapshot.error?.retryable ?? false));
     manualMeButton.disabled = busy || !snapshot.online;
     manualThemButton.disabled = busy || !snapshot.online;

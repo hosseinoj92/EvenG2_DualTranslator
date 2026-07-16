@@ -168,12 +168,6 @@ button.primary {
   font-weight: 650;
 }
 
-button.big {
-  width: 100%;
-  padding: 14px;
-  font-size: 17px;
-}
-
 button.danger {
   color: var(--danger);
   border-color: color-mix(in srgb, var(--danger) 45%, var(--border));

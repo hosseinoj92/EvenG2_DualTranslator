@@ -27,8 +27,12 @@ audio (completed utterance)
 - **Both** final screens show the recognized original speech _and_ its
   translation, so they can be compared.
 - A completed result **stays on the glasses indefinitely** — there is no
-  automatic timeout back to listening. Pressing R1 is the only normal way to
-  move on; it switches the speaking direction.
+  automatic timeout back to listening. Tap R1 (or the touchpad) once to hand
+  the turn to the other speaker, or **double-tap for "same speaker again"** —
+  the same person can add another sentence without switching direction.
+- Long results are **never truncated**: bodies over one screen are split into
+  word-safe pages — swipe down/up to read the rest of the current message
+  (the header shows e.g. `THEY SAID · 2/3`).
 - **No history** — only the latest turn is kept, so the app stays fast in
   long conversations and nothing said is retained afterwards.
 
@@ -46,7 +50,7 @@ German, French, Italian, Portuguese, Dutch, Turkish).
 | Backend     | Cloudflare Worker: Workers AI `whisper-large-v3-turbo` for speech-to-text, DeepL API for translation           |
 | Audio       | G2 mic, PCM s16le @ 16 kHz mono, local RMS voice-activity detection, WAV upload of completed utterances only   |
 | Display     | 576 × 288 panel, three text containers (header / body / footer)                                                |
-| Controls    | R1 ring / touchpad single click (switch speaker), double click (exit), phone buttons                           |
+| Controls    | R1 ring / touchpad: click = switch speaker, double-tap = same speaker again (exit outside results), swipe = page through a long result; phone buttons |
 
 ## 2. Conversation workflow
 
@@ -67,7 +71,8 @@ turn.
    starts.
 4. The translation completes the turn: original + translation stay on screen
    **indefinitely** — there is no automatic return to listening.
-5. Pressing R1 switches to Direction B (your turn).
+5. Pressing R1 switches to Direction B (your turn); double-tapping instead
+   lets the same person speak again in Direction A.
 
 ```text
 ┌ THEM            ┌ THEM               ┌ THEY SAID            ┌ THEY SAID

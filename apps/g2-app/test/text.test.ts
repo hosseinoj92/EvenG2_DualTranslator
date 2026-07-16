@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   normalizeWhitespace,
+  paginateText,
   stripMarkup,
   toDisplayBlock,
   toDisplayText,
@@ -81,5 +82,33 @@ describe('toDisplayBlock', () => {
     const result = toDisplayBlock('first line words\n\nsecond line words', 20);
     expect(result.length).toBeLessThanOrEqual(20);
     expect(result.endsWith('…')).toBe(true);
+  });
+});
+
+describe('paginateText', () => {
+  it('returns short text as a single page', () => {
+    expect(paginateText('hola mundo', 50)).toEqual(['hola mundo']);
+    expect(paginateText('', 50)).toEqual(['']);
+  });
+
+  it('splits at word boundaries and never loses content', () => {
+    const words = Array.from({ length: 40 }, (_, i) => `word${i}`);
+    const pages = paginateText(words.join(' '), 60);
+    expect(pages.length).toBeGreaterThan(1);
+    for (const page of pages) {
+      expect(page.length).toBeLessThanOrEqual(60);
+    }
+    // Reassembling the pages yields exactly the original words, none cut.
+    expect(pages.join(' ').split(/\s+/)).toEqual(words);
+  });
+
+  it('cuts an overlong single word mid-word rather than overflowing', () => {
+    const pages = paginateText('x'.repeat(25), 10);
+    expect(pages).toEqual(['x'.repeat(10), 'x'.repeat(10), 'x'.repeat(5)]);
+  });
+
+  it('prefers line breaks as split points', () => {
+    const pages = paginateText('first part\nsecond part', 15);
+    expect(pages).toEqual(['first part', 'second part']);
   });
 });

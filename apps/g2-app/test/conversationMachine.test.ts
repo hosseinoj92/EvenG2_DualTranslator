@@ -271,6 +271,105 @@ describe('errors and retry', () => {
   });
 });
 
+describe('speak again (double-tap)', () => {
+  const showingResult = () =>
+    run([
+      { type: 'START_CONVERSATION' },
+      { type: 'UTTERANCE_COMPLETED', requestId: 'r1' },
+      { type: 'PROCESSING_SUCCEEDED', requestId: 'r1', turn: makeTurn() },
+    ]);
+
+  it('re-listens to THEM from their result, direction preserved', () => {
+    const { state, effects } = reduce(showingResult(), { type: 'SPEAK_AGAIN' });
+    expect(state.status).toBe('LISTENING_TO_THEM');
+    expect(state.direction).toBe('them-to-me');
+    expect(effects).toContainEqual({ type: 'SET_MIC', open: true });
+    expect(effects).toContainEqual({ type: 'RESET_VAD' });
+  });
+
+  it('re-listens to ME from my read-aloud result, direction preserved', () => {
+    const paused = run([
+      { type: 'START_CONVERSATION' },
+      { type: 'TOGGLE_DIRECTION' },
+      { type: 'UTTERANCE_COMPLETED', requestId: 'r1' },
+      {
+        type: 'PROCESSING_SUCCEEDED',
+        requestId: 'r1',
+        turn: makeTurn({ direction: 'me-to-them' }),
+      },
+    ]);
+    expect(paused.status).toBe('READ_ALOUD_PAUSED');
+
+    const { state, effects } = reduce(paused, { type: 'SPEAK_AGAIN' });
+    expect(state.status).toBe('LISTENING_TO_ME');
+    expect(state.direction).toBe('me-to-them');
+    expect(effects).toContainEqual({ type: 'SET_MIC', open: true });
+  });
+
+  it('is ignored outside the result states', () => {
+    const listening = run([{ type: 'START_CONVERSATION' }]);
+    const { state, effects } = reduce(listening, { type: 'SPEAK_AGAIN' });
+    expect(state).toBe(listening);
+    expect(effects).toEqual([]);
+  });
+});
+
+describe('result body paging (swipes)', () => {
+  const showingResult = () =>
+    run([
+      { type: 'START_CONVERSATION' },
+      { type: 'UTTERANCE_COMPLETED', requestId: 'r1' },
+      { type: 'PROCESSING_SUCCEEDED', requestId: 'r1', turn: makeTurn() },
+    ]);
+
+  it('scrolls forward up to the last page and never past it', () => {
+    let state = showingResult();
+    expect(state.bodyPage).toBe(0);
+    state = reduce(state, { type: 'BODY_SCROLL_NEXT', pageCount: 3 }).state;
+    expect(state.bodyPage).toBe(1);
+    state = reduce(state, { type: 'BODY_SCROLL_NEXT', pageCount: 3 }).state;
+    state = reduce(state, { type: 'BODY_SCROLL_NEXT', pageCount: 3 }).state;
+    expect(state.bodyPage).toBe(2); // Clamped at pageCount - 1.
+  });
+
+  it('scrolls backward and clamps at the first page', () => {
+    let state = showingResult();
+    state = reduce(state, { type: 'BODY_SCROLL_NEXT', pageCount: 2 }).state;
+    state = reduce(state, { type: 'BODY_SCROLL_PREVIOUS' }).state;
+    state = reduce(state, { type: 'BODY_SCROLL_PREVIOUS' }).state;
+    expect(state.bodyPage).toBe(0);
+  });
+
+  it('resets the page on a new result, on toggle and on speak-again', () => {
+    const scrolled = reduce(showingResult(), { type: 'BODY_SCROLL_NEXT', pageCount: 4 }).state;
+    expect(scrolled.bodyPage).toBe(1);
+
+    expect(reduce(scrolled, { type: 'TOGGLE_DIRECTION' }).state.bodyPage).toBe(0);
+    expect(reduce(scrolled, { type: 'SPEAK_AGAIN' }).state.bodyPage).toBe(0);
+
+    const nextTurn = run(
+      [
+        { type: 'TOGGLE_DIRECTION' },
+        { type: 'UTTERANCE_COMPLETED', requestId: 'r2' },
+        {
+          type: 'PROCESSING_SUCCEEDED',
+          requestId: 'r2',
+          turn: makeTurn({ id: 't2', direction: 'me-to-them' }),
+        },
+      ],
+      scrolled,
+    );
+    expect(nextTurn.bodyPage).toBe(0);
+  });
+
+  it('ignores swipes outside the result states', () => {
+    const listening = run([{ type: 'START_CONVERSATION' }]);
+    const { state } = reduce(listening, { type: 'BODY_SCROLL_NEXT', pageCount: 5 });
+    expect(state.bodyPage).toBe(0);
+    expect(state.status).toBe('LISTENING_TO_THEM');
+  });
+});
+
 describe('latest turn only — no history', () => {
   // Results only leave via R1: toggle to me and back to return to listening.
   const backToListening: ConversationEvent[] = [

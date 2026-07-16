@@ -36,6 +36,7 @@ function makeSnapshot(overrides: Partial<AppSnapshot> = {}): AppSnapshot {
     processingPhase: 'idle',
     currentTranscript: null,
     latestTurn: null,
+    bodyPage: 0,
     error: null,
     vad: { rms: 0, speaking: false, state: 'idle' },
     lastLatencyMs: null,
@@ -49,6 +50,7 @@ function noopCallbacks(): CompanionUiCallbacks {
     onStartConversation: vi.fn(),
     onEndConversation: vi.fn(),
     onToggleDirection: vi.fn(),
+    onSpeakAgain: vi.fn(),
     onSwapLanguages: vi.fn(),
     onSelectMyLanguage: vi.fn(),
     onSelectOtherLanguage: vi.fn(),
@@ -167,6 +169,37 @@ describe('speaker direction', () => {
     const turn = makeTurn({ direction: 'me-to-them', sourceLanguage: 'en', targetLanguage: 'es' });
     ui.update(makeSnapshot({ status: 'READ_ALOUD_PAUSED', latestTurn: turn }));
     expect(speakerEl().textContent).toBe('YOU');
+  });
+});
+
+describe('same-speaker-again button', () => {
+  const speakAgainButton = () =>
+    [...root.querySelectorAll('button')].find(
+      (node) => node.textContent === 'Same speaker again',
+    )!;
+
+  it('is enabled only while a completed result is shown', () => {
+    ui.update(makeSnapshot({ status: 'LISTENING_TO_THEM' }));
+    expect(speakAgainButton().disabled).toBe(true);
+
+    ui.update(makeSnapshot({ status: 'SHOWING_THEM_RESULT', latestTurn: makeTurn() }));
+    expect(speakAgainButton().disabled).toBe(false);
+
+    ui.update(
+      makeSnapshot({
+        status: 'READ_ALOUD_PAUSED',
+        latestTurn: makeTurn({ direction: 'me-to-them' }),
+      }),
+    );
+    expect(speakAgainButton().disabled).toBe(false);
+  });
+
+  it('fires the onSpeakAgain callback', () => {
+    const callbacks = noopCallbacks();
+    ui = mountCompanionUi(root, callbacks);
+    ui.update(makeSnapshot({ status: 'SHOWING_THEM_RESULT', latestTurn: makeTurn() }));
+    speakAgainButton().click();
+    expect(callbacks.onSpeakAgain).toHaveBeenCalledTimes(1);
   });
 });
 

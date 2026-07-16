@@ -24,6 +24,7 @@ import { encodeWav } from '../audio/wavEncoder';
 import type { AppSnapshot, LanguageSettings, VadDebugInfo } from '../types';
 import { leadingDebounce, type LeadingDebounced } from '../utils/debounce';
 import { makeId } from '../utils/ids';
+import { resultBodyPages } from '../even/displayModel';
 import type { ConversationEffect, ConversationEvent, MachineState } from './conversationMachine';
 import { conversationReducer, initialMachineState } from './conversationMachine';
 
@@ -120,6 +121,7 @@ export class ConversationController {
       processingPhase: this.state.processingPhase,
       currentTranscript: this.state.currentTranscript,
       latestTurn: this.state.latestTurn,
+      bodyPage: this.state.bodyPage,
       error: this.state.lastError
         ? {
             code: this.state.lastError.code,
@@ -160,6 +162,36 @@ export class ConversationController {
       return;
     }
     this.toggleDirection();
+  }
+
+  /**
+   * Glasses double-tap. On a completed result it means "the same speaker
+   * talks again" (direction preserved). Returns false when the state has no
+   * double-tap meaning, so the caller can fall back to the exit gesture.
+   */
+  handleGlassesDoubleClick(): boolean {
+    if (this.state.status === 'SHOWING_THEM_RESULT' || this.state.status === 'READ_ALOUD_PAUSED') {
+      this.speakAgain();
+      return true;
+    }
+    return false;
+  }
+
+  /** Re-listen to the same speaker from a completed result. */
+  speakAgain(): void {
+    this.dispatch({ type: 'SPEAK_AGAIN' });
+  }
+
+  /** Swipe down on a result: next page of a long body. */
+  resultScrollNext(): void {
+    const turn = this.state.latestTurn;
+    if (!turn) return;
+    this.dispatch({ type: 'BODY_SCROLL_NEXT', pageCount: resultBodyPages(turn).length });
+  }
+
+  /** Swipe up on a result: previous page. */
+  resultScrollPrevious(): void {
+    this.dispatch({ type: 'BODY_SCROLL_PREVIOUS' });
   }
 
   retry(): void {
