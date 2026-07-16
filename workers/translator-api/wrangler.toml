@@ -2,15 +2,22 @@
 #
 # Deploy with `npm run deploy --workspace workers/translator-api` once you are
 # logged in via `wrangler login`. Nothing here contains a secret: the Workers AI
-# binding is resolved by Cloudflare at runtime and no API keys are stored.
+# binding is resolved by Cloudflare at runtime and the DeepL key is stored as
+# a Worker secret, never in this file.
+#
+# Translation engine — DeepL (free tier: 500,000 characters/month):
+#   1. Create a free API key at https://www.deepl.com/pro-api
+#   2. Production: npx wrangler secret put DEEPL_API_KEY
+#   3. Local dev:  copy .dev.vars.example to .dev.vars and paste the key
+# Without the secret the Worker falls back to Workers AI m2m100; check
+# GET /api/v1/health — it reports "translationEngine": "deepl" | "workers-ai".
 
 name = "turntranslate-api"
 main = "src/index.ts"
 compatibility_date = "2025-05-05"
 
-# Workers AI binding. Exposed to the Worker as `env.AI`.
-# Requires a Cloudflare account with Workers AI enabled (free tier works for
-# development; see README "Cost control" for pricing notes).
+# Workers AI binding. Exposed to the Worker as `env.AI`. Still required with
+# DeepL configured — transcription (Whisper) always runs on Workers AI.
 [ai]
 binding = "AI"
 

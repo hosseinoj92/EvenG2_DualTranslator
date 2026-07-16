@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   EventSourceType,
+  List_ItemEvent,
   OsEventTypeList,
   Sys_ItemEvent,
   Text_ItemEvent,
@@ -48,7 +49,49 @@ describe('routeEvenHubEvent', () => {
     expect(handlers.onClick).toHaveBeenCalledWith('ring');
   });
 
-  it('routes double-clicks from either envelope', () => {
+  it('accepts glasses-touchpad clicks exactly like ring clicks', () => {
+    const handlers = makeHandlers();
+    routeEvenHubEvent(
+      {
+        sysEvent: new Sys_ItemEvent({
+          eventType: OsEventTypeList.CLICK_EVENT,
+          eventSource: EventSourceType.TOUCH_EVENT_FROM_GLASSES_R,
+        }),
+      },
+      handlers,
+      acceptAnyClickPolicy,
+    );
+    expect(handlers.onClick).toHaveBeenCalledWith('glasses-right');
+
+    routeEvenHubEvent(
+      {
+        sysEvent: new Sys_ItemEvent({
+          eventType: OsEventTypeList.CLICK_EVENT,
+          eventSource: EventSourceType.TOUCH_EVENT_FROM_GLASSES_L,
+        }),
+      },
+      handlers,
+      acceptAnyClickPolicy,
+    );
+    expect(handlers.onClick).toHaveBeenCalledWith('glasses-left');
+  });
+
+  it('routes clicks arriving under the textEvent or listEvent envelope', () => {
+    const handlers = makeHandlers();
+    // Click on the event-capturing text container.
+    routeEvenHubEvent(
+      { textEvent: new Text_ItemEvent({ eventType: OsEventTypeList.CLICK_EVENT }) },
+      handlers,
+      acceptAnyClickPolicy,
+    );
+    // Touchpad tap delivered under listEvent (some host versions do this);
+    // omitted eventType again means CLICK_EVENT.
+    routeEvenHubEvent({ listEvent: new List_ItemEvent({}) }, handlers, acceptAnyClickPolicy);
+    expect(handlers.onClick).toHaveBeenCalledTimes(2);
+    expect(handlers.onClick).toHaveBeenCalledWith('unknown');
+  });
+
+  it('routes double-clicks from every envelope', () => {
     const handlers = makeHandlers();
     routeEvenHubEvent(
       { sysEvent: new Sys_ItemEvent({ eventType: OsEventTypeList.DOUBLE_CLICK_EVENT }) },
@@ -60,7 +103,12 @@ describe('routeEvenHubEvent', () => {
       handlers,
       acceptAnyClickPolicy,
     );
-    expect(handlers.onDoubleClick).toHaveBeenCalledTimes(2);
+    routeEvenHubEvent(
+      { listEvent: new List_ItemEvent({ eventType: OsEventTypeList.DOUBLE_CLICK_EVENT }) },
+      handlers,
+      acceptAnyClickPolicy,
+    );
+    expect(handlers.onDoubleClick).toHaveBeenCalledTimes(3);
     expect(handlers.onClick).not.toHaveBeenCalled();
   });
 

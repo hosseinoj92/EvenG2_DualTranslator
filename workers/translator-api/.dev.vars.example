@@ -1,0 +1,6 @@
+# Copy to .dev.vars (git-ignored) for `wrangler dev`.
+#
+# DeepL API key — create a free one at https://www.deepl.com/pro-api
+# (free tier: 500,000 characters/month; free keys end in ":fx").
+# Leave unset to fall back to Workers AI m2m100 translation.
+DEEPL_API_KEY=

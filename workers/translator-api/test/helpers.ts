@@ -15,10 +15,12 @@ export const BASE_URL = 'https://api.test';
 export function testConfig(overrides?: {
   allowedOrigins?: string;
   allowLocalDev?: string;
+  deeplApiKey?: string;
 }): ApiConfig {
   // `AI` is never touched by unit tests; configFromEnv only reads vars.
   return configFromEnv({
     AI: undefined as unknown as Ai,
+    DEEPL_API_KEY: overrides?.deeplApiKey,
     ALLOWED_ORIGINS: overrides?.allowedOrigins ?? 'https://app.example',
     ALLOW_LOCAL_DEV: overrides?.allowLocalDev ?? 'false',
   });

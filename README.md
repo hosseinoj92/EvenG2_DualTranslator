@@ -43,7 +43,7 @@ German, French, Italian, Portuguese, Dutch, Turkish).
 |             |                                                                                                                |
 | ----------- | -------------------------------------------------------------------------------------------------------------- |
 | Glasses app | Even Hub WebView app (Vite + vanilla TypeScript + `@evenrealities/even_hub_sdk`)                               |
-| Backend     | Cloudflare Worker with Workers AI (`whisper-large-v3-turbo` for speech-to-text, `m2m100-1.2b` for translation) |
+| Backend     | Cloudflare Worker: Workers AI `whisper-large-v3-turbo` for speech-to-text, DeepL API for translation           |
 | Audio       | G2 mic, PCM s16le @ 16 kHz mono, local RMS voice-activity detection, WAV upload of completed utterances only   |
 | Display     | 576 × 288 panel, three text containers (header / body / footer)                                                |
 | Controls    | R1 ring / touchpad single click (switch speaker), double click (exit), phone buttons                           |
@@ -136,7 +136,7 @@ pure and exhaustively unit-tested
                           │     turbo)         │
                           │ 2. /api/v1/        │
                           │    translate-text  │
-                          │    (m2m100-1.2b)   │
+                          │    (DeepL API)     │
                           └────────────────────┘
 ```
 
@@ -265,19 +265,34 @@ After deploying the Worker you must update the URL in **two places**:
 For browser-context testing also add your dev origins to `ALLOWED_ORIGINS` in
 `wrangler.toml` (localhost is already allowed while `ALLOW_LOCAL_DEV = "true"`).
 
-## 13. Cloudflare Workers AI binding
+## 13. Translation and transcription engines
 
-`wrangler.toml` declares:
+**Translation runs on the DeepL API** (free tier: 500,000 characters/month).
+Setup:
+
+1. Create a free API key at <https://www.deepl.com/pro-api> (free keys end in
+   `:fx`; the Worker picks the api-free vs api host automatically).
+2. Production: `npx wrangler secret put DEEPL_API_KEY` (then redeploy).
+3. Local dev: copy `workers/translator-api/.dev.vars.example` to `.dev.vars`
+   and paste the key.
+
+Without the secret the Worker **falls back to Workers AI `m2m100-1.2b`** so
+nothing breaks — verify which engine is active at `GET /api/v1/health`, which
+reports `"translationEngine": "deepl"` or `"workers-ai"`. English targets use
+`EN-US` and Portuguese `PT-PT`; both are one-line changes in
+`translationService.ts` (`DEEPL_TARGET_LANG`).
+
+**Transcription stays on Workers AI.** `wrangler.toml` declares:
 
 ```toml
 [ai]
 binding = "AI"
 ```
 
-Nothing else is needed — no API token in the code. The Worker calls
-`env.AI.run("@cf/openai/whisper-large-v3-turbo", …)` and
-`env.AI.run("@cf/meta/m2m100-1.2b", …)`. Base64 audio encoding uses the
-Workers-native `btoa` (chunked), so **no Node compatibility flag is required**.
+Nothing else is needed for it — no API token in the code. The Worker calls
+`env.AI.run("@cf/openai/whisper-large-v3-turbo", …)`. Base64 audio encoding
+uses the Workers-native `btoa` (chunked), so **no Node compatibility flag is
+required**.
 
 ## 14. Deployment (manual, never automatic)
 
@@ -305,6 +320,9 @@ in `app.json` first if `com.hosseinostovar.turntranslate` is taken
 - Completed utterances (WAV) are sent to **your** Cloudflare Worker and from
   there to Cloudflare Workers AI **for processing only**; audio is held in
   memory for the duration of the request and never persisted or logged.
+- Transcript text is sent to the DeepL API for translation. On the API plans
+  DeepL states texts are not stored permanently and are not used for model
+  training (see DeepL's privacy policy for API usage).
 - Transcripts and translations are not stored anywhere: only the latest
   completed turn is held in the phone's memory, each new turn replaces it,
   and it is dropped when the conversation ends.
@@ -324,10 +342,13 @@ in `app.json` first if `com.hosseinostovar.turntranslate` is taken
   whichever stage is in flight (transcription or translation) instead of
   stacking new ones. If translation fails, retry reuses the saved transcript
   rather than paying for a second transcription.
-- Whisper-large-v3-turbo and m2m100 are metered in Cloudflare "neurons"; both
-  are among the cheapest models in the catalog and the free daily allocation
-  covers typical development use. Watch usage in the Cloudflare dashboard
-  under Workers AI.
+- Whisper-large-v3-turbo is metered in Cloudflare "neurons" and is among the
+  cheapest models in the catalog; the free daily allocation covers typical
+  development use. Watch usage in the Cloudflare dashboard under Workers AI.
+- DeepL free tier includes 500,000 characters/month; usage is visible in the
+  DeepL account dashboard. When the quota is exhausted the app shows
+  "Monthly translation quota exhausted" (the Worker maps DeepL's 456 status
+  to a non-retryable error).
 
 ## 18. Troubleshooting
 
@@ -344,13 +365,15 @@ in `app.json` first if `com.hosseinostovar.turntranslate` is taken
 
 ## 19. Adding languages
 
-1. Confirm the ISO 639-1 code is supported by **both** models:
+1. Confirm the language is supported by **both** engines:
    - Whisper large-v3-turbo's `language` input (see the model page in the
      Cloudflare Workers AI catalog);
-   - m2m100-1.2b's `source_lang`/`target_lang` (M2M-100 covers 100 languages;
-     check the list on the model card).
+   - DeepL's `source_lang`/`target_lang` lists (see the DeepL API docs; some
+     targets need a regional variant like `EN-US`/`PT-PT`).
 2. Add one entry to `SUPPORTED_LANGUAGES` in
-   [packages/shared/src/languages.ts](packages/shared/src/languages.ts).
+   [packages/shared/src/languages.ts](packages/shared/src/languages.ts) and
+   one to each of `DEEPL_SOURCE_LANG` / `DEEPL_TARGET_LANG` in
+   [translationService.ts](workers/translator-api/src/services/translationService.ts).
 3. Run `npm test` — registry tests, backend validation and the frontend
    selector all derive from that single entry.
 4. Verify end-to-end with a real utterance in that language before shipping;
@@ -364,9 +387,9 @@ in `app.json` first if `com.hosseinostovar.turntranslate` is taken
   deliberately ships no TTS.
 - Whisper hallucinates occasionally on very short/noisy clips; utterances
   under `minimumSpeechMs` are rejected locally to reduce this.
-- `m2m100-1.2b` is a compact model: translations are solid for conversational
-  sentences, weaker for idioms. `TranslationService` is an interface so a
-  stronger provider can be swapped in without touching the routes.
+- `TranslationService` is an interface: DeepL is the default engine and
+  Workers AI m2m100 remains as the keyless fallback; other providers can be
+  swapped in without touching the routes.
 - The R1-ring-only input policy (`ringOnlyPolicy`) exists but is not the
   default: `eventSource` shares protobuf's zero-value omission, so "no
   metadata" and "dummy source" are indistinguishable and older firmware may

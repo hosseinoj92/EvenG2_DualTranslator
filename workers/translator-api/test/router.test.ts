@@ -8,7 +8,18 @@ describe('health route', () => {
     const response = await app(new Request(`${BASE_URL}/health`));
     expect(response.status).toBe(200);
     const body = await readJson<HealthResponse>(response);
-    expect(body).toEqual({ status: 'ok', service: 'turntranslate-api' });
+    expect(body).toEqual({
+      status: 'ok',
+      service: 'turntranslate-api',
+      translationEngine: 'workers-ai',
+    });
+  });
+
+  it('reports the DeepL engine once a key is configured', async () => {
+    const app = buildApp({ config: testConfig({ deeplApiKey: 'secret-key:fx' }) });
+    const response = await app(new Request(`${BASE_URL}/health`));
+    const body = await readJson<HealthResponse>(response);
+    expect(body.translationEngine).toBe('deepl');
   });
 
   it('rejects POST with 405', async () => {

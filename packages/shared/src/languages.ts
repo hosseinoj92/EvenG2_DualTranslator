@@ -1,10 +1,12 @@
 /**
  * Single source of truth for every language TurnTranslate supports.
  *
- * A language may only be added here after verifying that BOTH backend models
- * accept its ISO 639-1 code:
+ * A language may only be added here after verifying that BOTH backend engines
+ * accept it:
  *   - Transcription: `@cf/openai/whisper-large-v3-turbo` (`language` input)
- *   - Translation:   `@cf/meta/m2m100-1.2b` (`source_lang` / `target_lang` inputs)
+ *   - Translation:   DeepL (`source_lang` / `target_lang`) — also extend the
+ *     DEEPL_SOURCE_LANG / DEEPL_TARGET_LANG maps in the Worker's
+ *     translationService.ts, and check the Workers AI m2m100 fallback
  *
  * The frontend selector, the Worker validation and the model calls all read
  * from this registry, so one edit propagates everywhere. See the README

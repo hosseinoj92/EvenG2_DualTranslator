@@ -3,12 +3,15 @@
  *
  * Wire quirks handled here so the rest of the app never sees them:
  *   - Protobuf omits zero-value fields, and CLICK_EVENT has ordinal 0: a click
- *     arrives as a sysEvent/textEvent whose eventType is `undefined`. Event
- *     types are therefore coalesced to CLICK_EVENT whenever the envelope is
- *     present, before any comparison.
- *   - Taps, double-taps and lifecycle events arrive under `event.sysEvent`;
- *     scroll gestures (and clicks on event-capturing text containers) arrive
- *     under `event.textEvent`. Both envelopes are routed explicitly.
+ *     arrives as an envelope whose eventType is `undefined`. Event types are
+ *     therefore coalesced to CLICK_EVENT whenever the envelope is present,
+ *     before any comparison.
+ *   - Input events arrive under any of THREE envelopes depending on firmware
+ *     and input device: R1 ring taps and lifecycle events under
+ *     `event.sysEvent`, scroll gestures and clicks on event-capturing text
+ *     containers under `event.textEvent`, and glasses-touchpad taps under
+ *     `event.listEvent` on some host versions. All three are routed
+ *     identically so the touchpad works exactly like the ring.
  *   - Audio PCM frames arrive under `event.audioEvent`, a separate branch.
  */
 
@@ -84,45 +87,42 @@ export function routeEvenHubEvent(
   }
 
   const sys = event.sysEvent;
-  const text = event.textEvent;
   // Coalesce BEFORE comparing: an omitted eventType inside a present envelope
-  // means CLICK_EVENT (protobuf zero-value omission).
-  const sysType = sys ? (sys.eventType ?? OsEventTypeList.CLICK_EVENT) : null;
-  const textType = text ? (text.eventType ?? OsEventTypeList.CLICK_EVENT) : null;
+  // means CLICK_EVENT (protobuf zero-value omission). sysEvent, textEvent and
+  // listEvent all carry input gestures; which one a tap arrives under depends
+  // on the input device and host version, so they are treated uniformly.
+  const types = [event.sysEvent, event.textEvent, event.listEvent]
+    .filter((envelope) => envelope !== undefined)
+    .map((envelope) => envelope.eventType ?? OsEventTypeList.CLICK_EVENT);
+  const has = (type: OsEventTypeList): boolean => types.includes(type);
 
-  if (
-    sysType === OsEventTypeList.DOUBLE_CLICK_EVENT ||
-    textType === OsEventTypeList.DOUBLE_CLICK_EVENT
-  ) {
+  if (has(OsEventTypeList.DOUBLE_CLICK_EVENT)) {
     handlers.onDoubleClick();
     return;
   }
 
-  if (sysType === OsEventTypeList.SYSTEM_EXIT_EVENT) {
-    handlers.onSystemExit('system');
-    return;
-  }
-  if (sysType === OsEventTypeList.ABNORMAL_EXIT_EVENT) {
-    handlers.onSystemExit('abnormal');
-    return;
+  if (sys) {
+    const sysType = sys.eventType ?? OsEventTypeList.CLICK_EVENT;
+    if (sysType === OsEventTypeList.SYSTEM_EXIT_EVENT) {
+      handlers.onSystemExit('system');
+      return;
+    }
+    if (sysType === OsEventTypeList.ABNORMAL_EXIT_EVENT) {
+      handlers.onSystemExit('abnormal');
+      return;
+    }
   }
 
-  if (
-    sysType === OsEventTypeList.SCROLL_TOP_EVENT ||
-    textType === OsEventTypeList.SCROLL_TOP_EVENT
-  ) {
+  if (has(OsEventTypeList.SCROLL_TOP_EVENT)) {
     handlers.onSwipeUp();
     return;
   }
-  if (
-    sysType === OsEventTypeList.SCROLL_BOTTOM_EVENT ||
-    textType === OsEventTypeList.SCROLL_BOTTOM_EVENT
-  ) {
+  if (has(OsEventTypeList.SCROLL_BOTTOM_EVENT)) {
     handlers.onSwipeDown();
     return;
   }
 
-  if (sysType === OsEventTypeList.CLICK_EVENT || textType === OsEventTypeList.CLICK_EVENT) {
+  if (has(OsEventTypeList.CLICK_EVENT)) {
     const source = policy.classify(sys);
     if (policy.acceptClick(source)) {
       handlers.onClick(source);

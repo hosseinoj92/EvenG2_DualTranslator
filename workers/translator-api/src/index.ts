@@ -15,7 +15,7 @@ import { handleTranslateText } from './routes/translateText';
 import type { TranscriptionService } from './services/transcriptionService';
 import { createWorkersAiTranscriptionService } from './services/transcriptionService';
 import type { TranslationService } from './services/translationService';
-import { createWorkersAiTranslationService } from './services/translationService';
+import { createTranslationService } from './services/translationService';
 
 export interface AppDependencies {
   config: ApiConfig;
@@ -36,7 +36,7 @@ export function createApp(deps: AppDependencies): AppFetch {
 
     switch (url.pathname) {
       case API_PATHS.health:
-        return handleHealth(request, corsHeaders);
+        return handleHealth(request, deps.config, corsHeaders);
       case API_PATHS.interpret:
         return handleInterpret(request, deps, corsHeaders);
       case API_PATHS.transcribe:
@@ -89,7 +89,7 @@ export default {
     const app = createApp({
       config,
       transcription: createWorkersAiTranscriptionService(env.AI, config),
-      translation: createWorkersAiTranslationService(env.AI, config),
+      translation: createTranslationService(env.AI, config),
     });
     return app(request);
   },

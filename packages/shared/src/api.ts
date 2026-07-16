@@ -107,4 +107,6 @@ export interface TranslateTextRequest {
 export interface HealthResponse {
   status: 'ok';
   service: 'turntranslate-api';
+  /** Which engine translations currently run on. */
+  translationEngine?: 'deepl' | 'workers-ai';
 }
